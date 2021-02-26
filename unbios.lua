@@ -12,30 +12,14 @@
 -- Licensed under the MIT license
 if _HOST:find("UnBIOS") then return end
 local kernelArgs = table.pack(...)
-local keptAPIs = {bit32 = true, bit = true, ccemux = true, config = true, coroutine = true, debug = true, fs = true, http = true, io = true, mounter = true, os = true, periphemu = true, peripheral = true, redstone = true, rs = true, term = true, _HOST = true, _CC_DEFAULT_SETTINGS = true, _CC_DISABLE_LUA51_FEATURES = true, _VERSION = true, assert = true, collectgarbage = true, error = true, gcinfo = true, getfenv = true, getmetatable = true, ipairs = true, loadstring = true, math = true, newproxy = true, next = true, pairs = true, pcall = true, rawequal = true, rawget = true, rawlen = true, rawset = true, select = true, setfenv = true, setmetatable = true, string = true, table = true, tonumber = true, tostring = true, type = true, unpack = true, xpcall = true, turtle = true, pocket = true, commands = true, _G = true}
+local keptAPIs = {bit32 = true, bit = true, ccemux = true, config = true, coroutine = true, debug = true, ffi = true, fs = true, http = true, io = true, jit = true, mounter = true, os = true, periphemu = true, peripheral = true, redstone = true, rs = true, term = true, _HOST = true, _CC_DEFAULT_SETTINGS = true, _CC_DISABLE_LUA51_FEATURES = true, _VERSION = true, assert = true, collectgarbage = true, error = true, gcinfo = true, getfenv = true, getmetatable = true, ipairs = true, loadstring = true, math = true, newproxy = true, next = true, pairs = true, pcall = true, rawequal = true, rawget = true, rawlen = true, rawset = true, select = true, setfenv = true, setmetatable = true, string = true, table = true, tonumber = true, tostring = true, type = true, unpack = true, xpcall = true, turtle = true, pocket = true, commands = true, _G = true}
 local t = {}
 for k in pairs(_G) do if not keptAPIs[k] then table.insert(t, k) end end
 for _,k in ipairs(t) do _G[k] = nil end
 _G.term = _G.term.native()
 _G.http.checkURL = _G.http.checkURLAsync
 _G.http.websocket = _G.http.websocketAsync
-if debug then
-    -- Restore functions that were overwritten in the BIOS
-    local function restoreValue(tab, idx, name, hint)
-        local i, key, value = 1, debug.getupvalue(tab[idx], hint)
-        while key ~= name and key ~= nil do
-            key, value = debug.getupvalue(tab[idx], i)
-            i=i+1
-        end
-        tab[idx] = value or tab[idx]
-    end
-    restoreValue(_G, "loadstring", "nativeloadstring", 1)
-    restoreValue(_G, "load", "nativeload", 5)
-    restoreValue(http, "request", "nativeHTTPRequest", 3)
-    restoreValue(os, "shutdown", "nativeShutdown", 1)
-    restoreValue(os, "reboot", "nativeReboot", 1)
-end
-local delete = {os = {"version", "pullEventRaw", "pullEvent", "run", "loadAPI", "unloadAPI", "sleep"}, http = {"get", "post", "put", "delete", "patch", "options", "head", "trace", "listen", "checkURLAsync", "websocketAsync"}, fs = {"complete"}}
+local delete = {os = {"version", "pullEventRaw", "pullEvent", "run", "loadAPI", "unloadAPI", "sleep"}, http = {"get", "post", "put", "delete", "patch", "options", "head", "trace", "listen", "checkURLAsync", "websocketAsync"}, fs = {"complete", "isDriveRoot"}}
 for k,v in pairs(delete) do for _,a in ipairs(v) do _G[k][a] = nil end end
 _G._HOST = _G._HOST .. " (UnBIOS)"
 -- Set up TLCO
@@ -95,5 +79,22 @@ function _G.term.native()
         os.shutdown = oldshutdown
         return fn(table.unpack(kernelArgs, 1, kernelArgs.n))
     end
+end
+if debug then
+    -- Restore functions that were overwritten in the BIOS
+    -- Apparently this has to be done *after* redefining term.native
+    local function restoreValue(tab, idx, name, hint)
+        local i, key, value = 1, debug.getupvalue(tab[idx], hint)
+        while key ~= name and key ~= nil do
+            key, value = debug.getupvalue(tab[idx], i)
+            i=i+1
+        end
+        tab[idx] = value or tab[idx]
+    end
+    restoreValue(_G, "loadstring", "nativeloadstring", 1)
+    restoreValue(_G, "load", "nativeload", 5)
+    restoreValue(http, "request", "nativeHTTPRequest", 3)
+    restoreValue(os, "shutdown", "nativeShutdown", 1)
+    restoreValue(os, "reboot", "nativeReboot", 1)
 end
 coroutine.yield()

@@ -1,7 +1,15 @@
--- Phoenix Kernel v1.0
+-- Phoenix Kernel v0.1
 
-local syscalls = {}
-local processes = {
+args = {
+    init = "/sbin/init",
+    root = "/root",
+    rootfs = "craftos",
+    preemptive = true,
+    quantum = 2000
+}
+
+syscalls = {}
+processes = {
     [0] = {
         name = "kernel",
         id = 0,
@@ -9,26 +17,80 @@ local processes = {
         dependents = {}
     }
 }
-local KERNEL = processes[0]
+KERNEL = processes[0]
 
-local modules = {
-    process = {},
-    filesystem = {},
-    terminal = {},
-    user = {},
-    syslog = {}
-}
+kSyscallYield = {}
 
+process = {}
+filesystem = {}
+terminal = {}
+user = {}
+syslog = {}
 
 --#region Kernel initialization
 
 -- Expect is a very useful module, so it's loaded for the kernel to use even though it's a CraftOS module.
-local expect
 do
     local file = fs.open("/rom/modules/main/cc/expect.lua", "r")
     expect = loadstring(file.readAll(), "@/rom/modules/main/cc/expect.lua")()
     file.close()
     setmetatable(expect, {__call = function(self, ...) return self.expect(...) end})
+end
+
+-- textutils.[un]serialize is also very useful, so we load that in (but not anything else)
+do
+    local file = fs.open("/rom/apis/textutils.lua", "r")
+    local fn = loadstring(file.readAll(), "@/rom/apis/textutils.lua")
+    file.close()
+    local env = setmetatable({}, {__index = _G})
+    setfenv(fn, env)
+    fn()
+    serialize, unserialize = env.serialize, env.unserialize
+end
+
+-- Early version of panic function, before log initialization finishes (this is redefined later to use syslog)
+function panic(message)
+    term.setBackgroundColor(32768)
+    term.setTextColor(16384)
+    term.setCursorPos(1, 1)
+    term.setCursorBlink(false)
+    term.clear()
+    local x, y = 1, 1
+    local w, h = term.getSize()
+    message = "panic: " .. (message or "unknown")
+    for word in message:gmatch "%S+" do
+        if x + #word >= w then
+            x, y = 1, y + 1
+            if y > h then
+                term.scroll(1)
+                y = y - 1
+            end
+        end
+        term.setCursorPos(x, y)
+        term.write(word .. " ")
+        x = x + #word + 1
+    end
+    x, y = 1, y + 1
+    if y > h then
+        term.scroll(1)
+        y = y - 1
+    end
+    if debug then
+        local traceback = debug.traceback(nil, 2)
+        for line in traceback:gmatch "[^\n]+" do
+            term.setCursorPos(1, y)
+            term.write(line)
+            y = y + 1
+            if y > h then
+                term.scroll(1)
+                y = y - 1
+            end
+        end
+    end
+    term.setCursorPos(1, y)
+    term.setTextColor(2)
+    term.write("panic: We are hanging here...")
+    while true do coroutine.yield() end
 end
 
 local function do_syscall(call, ...)
@@ -37,40 +99,142 @@ local function do_syscall(call, ...)
     else error(res[2], 3) end
 end
 
+local function deepcopy(tab)
+    if type(tab) == "table" then
+        local retval = setmetatable({}, getmetatable(tab))
+        for k,v in pairs(tab) do retval[deepcopy(k)] = deepcopy(v) end
+        return retval
+    else return tab end
+end
+
+local function split(str, sep)
+    local t = {}
+    for match in str:match "[^" .. (sep or "%s") .. "]+" do t[#t+1] = match end
+    return t
+end
+
+for _,v in ipairs({...}) do
+    local key, value = v:match("^([^=]+)=(.+)$")
+    if key and value then
+        if type(args[key]) == "boolean" then args[key] = value:lower() == "true" or value == "1"
+        elseif type(args[key]) == "number" then args[key] = tonumber(value)
+        else args[key] = value end
+    end
+end
+
+if jit and args.preemptive then panic("Phoenix does not support preemption when running under LuaJIT. Please set preemptive to false in the kernel arguments.") end
+if not debug and args.preemptive then panic("Phoenix does not support preemption without the debug API. Please set preemptive to false in the kernel arguments.") end
+
 --#endregion
 
 --#region Filesystem implementation
 
-function syscalls.open(process, path, mode)
+mounts = {}
+filesystems = {
+    craftos = {
+        meta = (function()
+            local file = fs.open("/meta.ltn")
+            if not file then return end
+            local meta = unserialize(file.readAll())
+            file.close()
+            return meta
+        end)() or {},
+        new = function(self, process, path, options)
+            return setmetatable({
+                path = path
+            }, {__index = self})
+        end
+    },
+    tmpfs = {
+
+    },
+    drivefs = {
+
+    }
+}
+
+local function getMount(process, path)
+    local fullPath = split(fs.combine(path:sub(1, 1) == "/" and "" or process.dir, path))
+    local maxPath
+    for k in pairs(mounts) do
+        local ok = true
+        for i,c in ipairs(k) do if fullPath[i] ~= c then ok = false break end end
+        if ok and (not maxPath or #k > #maxPath) then maxPath = k end
+    end
+    if not maxPath then panic("Could not find mount for path " .. path .. ". Where is root?") end
+    return mounts[maxPath], fs.combine(table.unpack(fullPath, #maxPath + 1, #fullPath))
+end
+
+function syscalls.open(process, thread, path, mode)
+    expect(1, path, "string")
+    expect(2, mode, "string")
+    if not mode:match "^[rwa]b?$" then error("Invalid mode", 0) end
+    local mount, p = getMount(process, path)
+    return mount:open(process, p, mode)
+end
+
+function syscalls.list(process, thread, path)
+    expect(1, path, "string")
+    local mount, p = getMount(process, path)
+    return mount:list(process, p)
+end
+
+function syscalls.stat(process, thread, path)
+    expect(1, path, "string")
+    local mount, p = getMount(process, path)
+    return mount:stat(process, p)
+end
+
+function syscalls.remove(process, thread, path)
+    expect(1, path, "string")
+    local mount, p = getMount(process, path)
+    return mount:remove(process, p)
+end
+
+function syscalls.rename(process, thread, from, to)
+    expect(1, from, "string")
+    expect(2, to, "string")
+    local mountA, pA = getMount(process, from)
+    local mountB, pB = getMount(process, to)
+    if mountA ~= mountB then error("Attempt to rename file across two filesystems", 0) end
+    return mountA:rename(process, pA, pB)
+end
+
+function syscalls.mkdir(process, thread, path)
+    expect(1, path, "string")
+    local mount, p = getMount(process, path)
+    return mount:mkdir(process, p)
+end
+
+function syscalls.chmod(process, thread, path, mode)
+    expect(1, path, "string")
+    expect(2, mode, "number")
+    local mount, p = getMount(process, path)
+    return mount:chmod(process, p, mode)
+end
+
+function syscalls.chown(process, thread, path, user)
+    expect(1, path, "string")
+    expect(2, user, "number")
+    local mount, p = getMount(process, path)
+    return mount:chown(process, p, user)
+end
+
+function syscalls.mount(process, thread, type, src, dest, options)
+    expect(1, type, "string")
+    expect(2, src, "string")
+    expect(3, dest, "string")
+    expect(4, options, "table", "nil")
 
 end
 
-function syscalls.list(process, path)
+function syscalls.unmount(process, thread, path)
+    expect(1, path, "string")
 
 end
 
-function syscalls.stat(process, path)
-
-end
-
-function syscalls.remove(process, path)
-
-end
-
-function syscalls.rename(process, path)
-
-end
-
-function syscalls.mkdir(process, path)
-
-end
-
-function syscalls.chmod(process, path, mode)
-
-end
-
-function syscalls.chown(process, path, user)
-
+function syscalls.combine(process, thread, ...)
+    return fs.combine(...)
 end
 
 --#endregion
@@ -225,7 +389,7 @@ G.debug = {
 
 local syslogs = {
     default = {
-        file = modules.filesystem.open(KERNEL, "/var/log/default.txt", "a"),
+        file = filesystem.open(KERNEL, "/var/log/default.log", "a"),
         stream = {},
         tty = {} -- console (tty0)
     }
@@ -252,7 +416,7 @@ local loglevels = {
     "Panic"
 }
 
-function syscalls.syslog(process, options, ...)
+function syscalls.syslog(process, thread, options, ...)
     local args = table.pack(...)
     if type(options) == "table" then
         expect.field(options, "name", "string", "nil")
@@ -369,7 +533,7 @@ function syscalls.syslog(process, options, ...)
                 end
             end
             if ok then
-                modules.process.queueEvent(v.pid, "syslog", v.id, options)
+                process.queueEvent(v.pid, "syslog", v.id, options)
             end
         end
     end
@@ -379,7 +543,7 @@ function syscalls.syslog(process, options, ...)
     end
 end
 
-function syscalls.mklog(process, name, streamed, path)
+function syscalls.mklog(process, thread, name, streamed, path)
     if process.uid ~= 0 then return false, "Permission denied" end
     expect(1, name, "string")
     expect(2, streamed, "boolean", "nil")
@@ -388,7 +552,7 @@ function syscalls.mklog(process, name, streamed, path)
     syslogs[name] = {}
     if path then
         local err
-        syslogs[name].file, err = modules.filesystem.open(process, path, "a")
+        syslogs[name].file, err = filesystem.open(process, path, "a")
         if syslogs[name].file == nil then
             syslogs[name] = nil
             return false, "Could not open log file: " .. err
@@ -398,19 +562,19 @@ function syscalls.mklog(process, name, streamed, path)
     return true
 end
 
-function syscalls.rmlog(process, name)
+function syscalls.rmlog(process, thread, name)
     if process.uid ~= 0 then return false, "Permission denied" end
     expect(1, name, "string")
     if not syslogs[name] then return false, "Log does not exist" end
     if syslogs[name].stream then for _,v in pairs(syslogs[name].stream) do
-        modules.process.queueEvent(v.pid, "syslog_close", v.id)
+        process.queueEvent(v.pid, "syslog_close", v.id)
         processes[v.pid].dependents[v.id] = nil
     end end
     syslogs[name] = nil
     return true
 end
 
-function syscalls.openlog(process, name, filter)
+function syscalls.openlog(process, thread, name, filter)
     expect(1, name, "string")
     expect(2, filter, "string", "nil")
     if not syslogs[name] then error("Log does not exist", 0) end
@@ -428,7 +592,7 @@ function syscalls.openlog(process, name, filter)
     return id
 end
 
-function syscalls.closelog(process, name)
+function syscalls.closelog(process, thread, name)
     expect(1, name, "string", "number")
     if type(name) == "string" then
         -- Close all logs on `name`
@@ -456,7 +620,7 @@ function syscalls.closelog(process, name)
     end
 end
 
-function syscalls.logtty(process, name, tty, level)
+function syscalls.logtty(process, thread, name, tty, level)
     if process.uid ~= 0 then return false, "Permission denied" end
     expect(1, name, "string")
     expect(2, tty, "table", "nil")
@@ -467,13 +631,24 @@ function syscalls.logtty(process, name, tty, level)
     return true
 end
 
-function modules.syslog.log(options, ...)
-    return pcall(syscalls.syslog, KERNEL, options, ...)
+function syslog.log(options, ...)
+    return pcall(syscalls.syslog, KERNEL, nil, options, ...)
+end
+
+local oldpanic = panic
+-- This function can be called either standalone or from within xpcall.
+function panic(message)
+    -- TODO: Write the syslog-related version
+    return oldpanic(message)
 end
 
 --#endregion
 
 --#region Dynamic linker & path management
+
+--#endregion
+
+--#region Event system
 
 --#endregion
 
@@ -487,60 +662,256 @@ local process_template = {
         {gc = function() end}
     },
     parent = 0,
-    coro = coroutine.create(function() end),
-    status = "starting",
-    args = {"a"},
-    filter = {},
-    tty = "tty0",
     dir = "/",
     stdin = "tty0",
     stdout = {}, -- pipe
     stderr = "tty0",
     cputime = 0.2,
-    env = {}
+    env = {},
+    syscallyield = nil,
+    threads = {
+        [0] = {
+            id = 0,
+            name = "",
+            coro = coroutine.create(function() end),
+            status = "starting",
+            args = {"a", n = 1},
+            filter = function(process, thread, event) end
+        }
+    }
 }
 
-local function runloop()
+local function mkenv(process)
+    local env = setmetatable(deepcopy(G), {
+        __index = function(self, idx)
+            if idx == "_ENV" then return getfenv(2) end
+            return nil
+        end,
+        __newindex = function(self, idx, val)
+            if idx == "_ENV" then setfenv(2, val) end
+            rawset(self, idx, val)
+        end
+    })
+    env._G = env
+    return env
+end
+
+local function preempt_hook()
+    coroutine.yield("preempt")
+end
+
+local function reap_process(process)
 
 end
 
-function syscalls.getpid(process)
+function syscalls.getpid(process, thread)
     return process.id
 end
 
-function syscalls.getppid(process)
+function syscalls.getppid(process, thread)
     return process.parent
 end
 
-function syscalls.clock(process)
+function syscalls.clock(process, thread)
     return process.cputime
 end
 
-function syscalls.getenv(process)
+function syscalls.getenv(process, thread)
     return process.env
 end
 
-function syscalls.fork(process, func, ...)
+function syscalls.fork(process, thread, func, name, ...)
+    expect(1, func, "function")
+    expect(2, name, "string", "nil")
+    local id = #processes + 1
+    processes[id] = {
+        id = id,
+        name = name or process.name,
+        uid = process.uid,
+        dependents = {},
+        parent = process.id,
+        dir = process.dir,
+        stdin = process.stdin,
+        stdout = process.stdout,
+        stderr = process.stderr,
+        cputime = 0,
+        syscallyield = nil,
+        threads = {
+            [0] = {
+                id = 0,
+                name = "<main thread>",
+                coro = coroutine.create(func),
+                status = "starting",
+                args = table.pack(...),
+                filter = nil,
+            }
+        }
+    }
+    processes[id].env = mkenv(processes[id])
+    setfenv(func, processes[id].env)
+    if args.preemptive then debug.sethook(processes[id].threads[0].coro, preempt_hook, "", args.quantum) end
+    return id
+end
+
+function syscalls.exec(process, thread, path, ...)
+    expect(1, path, "string")
+    local file, err = filesystem.open(process, path, "rb")
+    if not file then error("Could not open file: " .. err, 0) end
+    local contents = file.readAll()
+    file.close()
+    if contents:sub(1, 2) == "#!" then
+        local command = contents:sub(3, contents:find("\n") - 1)
+        local args, i = {}, 0
+        for s in command:gmatch "%S+" do args[i] = s i=i+1 end
+        for _,v in ipairs{...} do args[i] = v i=i+1 end
+        if args[0] == path then error("Recursive path detected while resolving shebang", 0) end
+        local id = syscalls.exec(process, thread, args[0], table.unpack(args, 1, i - 1))
+        processes[id].name = path
+        return id
+    else
+        local func, err = load(contents, "@" .. path, "bt")
+        if not func then error("Could not execute file: " .. err, 0) end
+        local id = #processes + 1
+        processes[id] = {
+            id = id,
+            name = path,
+            uid = process.uid,
+            dependents = {},
+            parent = process.id,
+            dir = fs.getDir(path),
+            stdin = process.stdin,
+            stdout = process.stdout,
+            stderr = process.stderr,
+            cputime = 0,
+            syscallyield = nil,
+            threads = {
+                [0] = {
+                    id = 0,
+                    name = "<main thread>",
+                    coro = coroutine.create(func),
+                    status = "starting",
+                    args = table.pack(...),
+                    filter = nil,
+                }
+            }
+        }
+        processes[id].env = mkenv(processes[id])
+        if args.preemptive then debug.sethook(processes[id].threads[0].coro, preempt_hook, "", args.quantum) end
+        return id
+    end
+end
+
+function syscalls.newthread(process, thread, func, ...)
+    expect(1, func, "function")
+    local id = #process.threads + 1
+    process.threads[id] = {
+        id = id,
+        name = "<thread:" .. id .. ">",
+        coro = coroutine.create(func),
+        status = "starting",
+        args = table.pack(...),
+        filter = nil,
+    }
+    setfenv(func, process.env)
+    if args.preemptive then debug.sethook(processes[id].threads[id].coro, preempt_hook, "", args.quantum) end
+    return id
+end
+
+function syscalls.exit(process, thread, code)
 
 end
 
-function syscalls.exec(process, path, ...)
+function syscalls.waitpid(process, thread, pid)
 
 end
 
-function syscalls.exit(process, code)
+function syscalls.getpinfo(process, thread, pid)
 
+end
+
+--#endregion
+
+--#region Mutex/atomics
+
+local nextMutexID = 0
+
+local mutex = {}
+
+function mutex:lock()
+    return do_syscall("lockmutex", self)
+end
+
+function mutex:unlock()
+    return do_syscall("unlockmutex", self)
+end
+
+function mutex:try_lock()
+    return do_syscall("trylockmutex", self)
+end
+
+-- make this a library function?
+function syscalls.newmutex(process, thread, recursive)
+    expect(1, recursive, "boolean", "nil")
+    nextMutexID = nextMutexID + 1
+    return setmetatable({recursive = recursive and 0, id = nextMutexID - 1}, {__name = "mutex", __tostring = function(self) return "mutex: " .. self.id end, __index = mutex})
+end
+
+function syscalls.lockmutex(process, thread, mtx)
+    expect(1, mtx, "table")
+    if not getmetatable(mtx) or getmetatable(mtx).__name ~= "mutex" then error("bad argument #1 (expected mutex, got table)", 0) end
+    if mtx.owner then
+        if mtx.owner ~= thread.id then
+            thread.filter = function(process, thread)
+                return mtx.owner == nil or mtx.owner == thread.id
+            end
+            return kSyscallYield, "lockmutex"
+        elseif mtx.recursive then
+            mtx.recursive = mtx.recursive + 1
+        else error("cannot recursively lock mutex", 0) end
+    else
+        mtx.owner = process.id
+        if mtx.recursive then mtx.recursive = 1 end
+    end
+end
+
+function syscalls.unlockmutex(process, thread, mtx)
+    expect(1, mtx, "table")
+    if not getmetatable(mtx) or getmetatable(mtx).__name ~= "mutex" then error("bad argument #1 (expected mutex, got table)", 0) end
+    if mtx.owner == process.owner then
+        if mtx.recursive then
+            mtx.recursive = mtx.recursive - 1
+            if mtx.recursive == 0 then mtx.owner = nil end
+        else mtx.owner = nil end
+    elseif mtx.owner == nil then error("mutex already unlocked", 0)
+    else error("mutex not locked by current thread") end
+end
+
+function syscalls.trylockmutex(process, thread, mtx)
+    expect(1, mtx, "table")
+    if not getmetatable(mtx) or getmetatable(mtx).__name ~= "mutex" then error("bad argument #1 (expected mutex, got table)", 0) end
+    if mtx.owner then
+        if mtx.owner ~= process.id then
+            return false
+        elseif mtx.recursive then
+            mtx.recursive = mtx.recursive + 1
+            return true
+        else error("cannot recursively lock mutex", 0) end
+    else
+        mtx.owner = process.id
+        if mtx.recursive then mtx.recursive = 1 end
+        return true
+    end
 end
 
 --#endregion
 
 --#region User support
 
-function syscalls.getuid(process)
+function syscalls.getuid(process, thread)
 
 end
 
-function syscalls.setuid(process, uid)
+function syscalls.setuid(process, thread, uid)
 
 end
 
