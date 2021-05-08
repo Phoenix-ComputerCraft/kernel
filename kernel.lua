@@ -1,7 +1,7 @@
 -- Phoenix Kernel v0.1
 
 args = {
-    init = "/sbin/init",
+    init = "/sbin/init.lua",
     root = "/root",
     rootfs = "craftos",
     preemptive = true,
@@ -14,6 +14,7 @@ processes = {
         name = "kernel",
         id = 0,
         uid = 0,
+        dir = "/",
         dependents = {}
     }
 }
@@ -32,7 +33,7 @@ syslog = {}
 -- Expect is a very useful module, so it's loaded for the kernel to use even though it's a CraftOS module.
 do
     local file = fs.open("/rom/modules/main/cc/expect.lua", "r")
-    expect = loadstring(file.readAll(), "@/rom/modules/main/cc/expect.lua")()
+    expect = (loadstring or load)(file.readAll(), "@/rom/modules/main/cc/expect.lua")()
     file.close()
     setmetatable(expect, {__call = function(self, ...) return self.expect(...) end})
 end
@@ -40,22 +41,52 @@ end
 -- textutils.[un]serialize is also very useful, so we load that in (but not anything else)
 do
     local file = fs.open("/rom/apis/textutils.lua", "r")
-    local fn = loadstring(file.readAll(), "@/rom/apis/textutils.lua")
+    local fn = (loadstring or load)(file.readAll(), "@/rom/apis/textutils.lua")
     file.close()
-    local env = setmetatable({}, {__index = _G})
+    local env = setmetatable({dofile = function() return expect end}, {__index = _G})
     setfenv(fn, env)
     fn()
     serialize, unserialize = env.serialize, env.unserialize
+end
+
+-- load is the de facto loader - loadstring will no longer be available. Since load isn't available on 5.1 (at least for strings), we shim it first.
+if loadstring then
+    local old_load, old_loadstring = load, loadstring
+    function load(chunk, name, mode, env)
+        expect(1, chunk, "string", "function")
+        expect(2, name, "string", "nil")
+        expect(3, mode, "string", "nil")
+        expect(4, env, "table", "nil")
+        if type(chunk) == "string" then
+            if chunk:sub(1, 4) == "\033Lua" then
+                if mode == nil or mode:find "b" then
+                    local fn, err = old_loadstring(chunk, name)
+                    if fn and env then setfenv(fn, env) end
+                    return fn, err
+                else return nil, "attempt to load a binary chunk (mode is '" .. mode .. "')" end
+            else
+                if mode == nil or mode:find "t" then
+                    local fn, err = old_loadstring(chunk, name)
+                    if fn and env then setfenv(fn, env) end
+                    return fn, err
+                else return nil, "attempt to load a text chunk (mode is '" .. mode .. "')" end
+            end
+        else
+            local fn, err = old_load(chunk, name)
+            if fn then setfenv(fn, env) end
+            return fn, err
+        end
+    end
+    loadstring = nil
 end
 
 -- Early version of panic function, before log initialization finishes (this is redefined later to use syslog)
 function panic(message)
     term.setBackgroundColor(32768)
     term.setTextColor(16384)
-    term.setCursorPos(1, 1)
     term.setCursorBlink(false)
-    term.clear()
-    local x, y = 1, 1
+    local x, y = term.getCursorPos()
+    x = 1
     local w, h = term.getSize()
     message = "panic: " .. (message or "unknown")
     for word in message:gmatch "%S+" do
@@ -67,6 +98,7 @@ function panic(message)
             end
         end
         term.setCursorPos(x, y)
+        if x == 1 then term.clearLine() end
         term.write(word .. " ")
         x = x + #word + 1
     end
@@ -109,7 +141,7 @@ end
 
 local function split(str, sep)
     local t = {}
-    for match in str:match "[^" .. (sep or "%s") .. "]+" do t[#t+1] = match end
+    for match in str:gmatch("[^" .. (sep or "%s") .. "]+") do t[#t+1] = match end
     return t
 end
 
@@ -124,16 +156,42 @@ end
 
 if jit and args.preemptive then panic("Phoenix does not support preemption when running under LuaJIT. Please set preemptive to false in the kernel arguments.") end
 if not debug and args.preemptive then panic("Phoenix does not support preemption without the debug API. Please set preemptive to false in the kernel arguments.") end
+if not getfenv then
+    if not debug then panic("Phoenix requires the debug API when running under Lua 5.2 and later.") end
+    -- getfenv/setfenv replacements from https://leafo.net/guides/setfenv-in-lua52-and-above.html
+    function getfenv(fn)
+        local i = 1
+        while true do
+            local name, val = debug.getupvalue(fn, i)
+            if name == "_ENV" then return val
+            elseif not name then break end
+            i = i + 1
+        end
+    end
+    function setfenv(fn, env)
+        local i = 1
+        while true do
+            local name = debug.getupvalue(fn, i)
+            if name == "_ENV" then
+                debug.upvaluejoin(fn, i, function() return env end, 1)
+                break
+            elseif not name then break end
+            i = i + 1
+        end
+        return fn
+    end
+end
 
 --#endregion
 
 --#region Filesystem implementation
 
+-- This is really unfinished. Please make this work properly.
 mounts = {}
 filesystems = {
     craftos = {
         meta = (function()
-            local file = fs.open("/meta.ltn")
+            local file = fs.open("/meta.ltn", "r")
             if not file then return end
             local meta = unserialize(file.readAll())
             file.close()
@@ -143,6 +201,9 @@ filesystems = {
             return setmetatable({
                 path = path
             }, {__index = self})
+        end,
+        open = function(self, process, path, mode)
+            return fs.open(fs.combine(self.path, path), mode)
         end
     },
     tmpfs = {
@@ -154,18 +215,18 @@ filesystems = {
 }
 
 local function getMount(process, path)
-    local fullPath = split(fs.combine(path:sub(1, 1) == "/" and "" or process.dir, path))
+    local fullPath = split(fs.combine(path:sub(1, 1) == "/" and "" or process.dir, path), "/")
     local maxPath
     for k in pairs(mounts) do
         local ok = true
-        for i,c in ipairs(k) do if fullPath[i] ~= c then ok = false break end end
+        for i,c in ipairs(split(k, "/")) do if fullPath[i] ~= c then ok = false break end end
         if ok and (not maxPath or #k > #maxPath) then maxPath = k end
     end
     if not maxPath then panic("Could not find mount for path " .. path .. ". Where is root?") end
     return mounts[maxPath], fs.combine(table.unpack(fullPath, #maxPath + 1, #fullPath))
 end
 
-function syscalls.open(process, thread, path, mode)
+function filesystem.open(process, path, mode)
     expect(1, path, "string")
     expect(2, mode, "string")
     if not mode:match "^[rwa]b?$" then error("Invalid mode", 0) end
@@ -173,25 +234,25 @@ function syscalls.open(process, thread, path, mode)
     return mount:open(process, p, mode)
 end
 
-function syscalls.list(process, thread, path)
+function filesystem.list(process, path)
     expect(1, path, "string")
     local mount, p = getMount(process, path)
     return mount:list(process, p)
 end
 
-function syscalls.stat(process, thread, path)
+function filesystem.stat(process, path)
     expect(1, path, "string")
     local mount, p = getMount(process, path)
     return mount:stat(process, p)
 end
 
-function syscalls.remove(process, thread, path)
+function filesystem.remove(process, path)
     expect(1, path, "string")
     local mount, p = getMount(process, path)
     return mount:remove(process, p)
 end
 
-function syscalls.rename(process, thread, from, to)
+function filesystem.rename(process, from, to)
     expect(1, from, "string")
     expect(2, to, "string")
     local mountA, pA = getMount(process, from)
@@ -200,27 +261,27 @@ function syscalls.rename(process, thread, from, to)
     return mountA:rename(process, pA, pB)
 end
 
-function syscalls.mkdir(process, thread, path)
+function filesystem.mkdir(process, path)
     expect(1, path, "string")
     local mount, p = getMount(process, path)
     return mount:mkdir(process, p)
 end
 
-function syscalls.chmod(process, thread, path, mode)
+function filesystem.chmod(process, path, mode)
     expect(1, path, "string")
     expect(2, mode, "number")
     local mount, p = getMount(process, path)
     return mount:chmod(process, p, mode)
 end
 
-function syscalls.chown(process, thread, path, user)
+function filesystem.chown(process, path, user)
     expect(1, path, "string")
     expect(2, user, "number")
     local mount, p = getMount(process, path)
     return mount:chown(process, p, user)
 end
 
-function syscalls.mount(process, thread, type, src, dest, options)
+function filesystem.mount(process, type, src, dest, options)
     expect(1, type, "string")
     expect(2, src, "string")
     expect(3, dest, "string")
@@ -228,14 +289,26 @@ function syscalls.mount(process, thread, type, src, dest, options)
 
 end
 
-function syscalls.unmount(process, thread, path)
+function filesystem.unmount(process, path)
     expect(1, path, "string")
 
 end
 
-function syscalls.combine(process, thread, ...)
+function filesystem.combine(...)
     return fs.combine(...)
 end
+
+function syscalls.open(process, thread, ...) return filesystem.open(process, ...) end
+function syscalls.list(process, thread, ...) return filesystem.list(process, ...) end
+function syscalls.stat(process, thread, ...) return filesystem.stat(process, ...) end
+function syscalls.remove(process, thread, ...) return filesystem.remove(process, ...) end
+function syscalls.rename(process, thread, ...) return filesystem.rename(process, ...) end
+function syscalls.mkdir(process, thread, ...) return filesystem.mkdir(process, ...) end
+function syscalls.chmod(process, thread, ...) return filesystem.chmod(process, ...) end
+function syscalls.chown(process, thread, ...) return filesystem.chown(process, ...) end
+function syscalls.mount(process, thread, ...) return filesystem.mount(process, ...) end
+function syscalls.unmount(process, thread, ...) return filesystem.unmount(process, ...) end
+function syscalls.combine(process, thread, ...) return filesystem.combine(...) end
 
 --#endregion
 
@@ -389,22 +462,11 @@ G.debug = {
 
 local syslogs = {
     default = {
-        file = filesystem.open(KERNEL, "/var/log/default.log", "a"),
+        --file = filesystem.open(KERNEL, "/var/log/default.log", "a"),
         stream = {},
-        tty = {} -- console (tty0)
+        --tty = {} -- console (tty0)
     }
 }
-
-local textutils
-do
-    local file = fs.open("/rom/apis/textutils.lua", "r")
-    local fn = loadstring(file.readAll(), "@/rom/apis/textutils.lua")
-    file.close()
-    setmetatable(textutils, {__index = _G})
-    setfenv(fn, textutils)
-    fn()
-    setmetatable(textutils, nil)
-end
 
 local loglevels = {
     [0] = "Debug",
@@ -415,6 +477,11 @@ local loglevels = {
     "Critical",
     "Panic"
 }
+
+local function concat(t, sep, i, j)
+    if i == j then return tostring(t[i])
+    else return tostring(t[i]) .. sep .. concat(t, sep, i + 1, j) end
+end
 
 function syscalls.syslog(process, thread, options, ...)
     local args = table.pack(...)
@@ -429,15 +496,18 @@ function syscalls.syslog(process, thread, options, ...)
         if options.level and (options.level < 0 or options.level > #loglevels) then error("bad field 'level' (level out of range)", 0) end
         options.name = options.name or "default"
         options.process = options.process or process.id
+        options.thread = options.thread or (thread and thread.id)
         options.level = options.level or 1
     else
+        local n = args.n
         table.insert(args, 1, options)
-        options = {process = process.id, level = 1, name = "default"}
+        args.n = n + 1
+        options = {process = process.id, thread = thread and thread.id, level = 1, name = "default"}
     end
     local log = syslogs[options.name]
     if log == nil then error("No such log named " .. options.name, 0) end
     local message
-    for i = 1, args.n do message = (i == 1 and "" or message .. " ") .. textutils.serialize(args[i]) end
+    for i = 1, args.n do message = (i == 1 and "" or message .. " ") .. serialize(args[i]) end
     if log.file then
         log.file.writeLine(("[%s]%s %s[%d%s]%s [%s]: %s"):format(
             os.date("%b %d %X"),
@@ -446,7 +516,8 @@ function syscalls.syslog(process, thread, options, ...)
             options.process,
             options.thread and ":" .. options.thread or "",
             options.module and " (" .. options.module .. ")" or "",
-            loglevels[options.level]
+            loglevels[options.level],
+            concat(args, " ", 1, args.n)
         ))
         log.file.flush()
     end
@@ -639,8 +710,11 @@ local oldpanic = panic
 -- This function can be called either standalone or from within xpcall.
 function panic(message)
     -- TODO: Write the syslog-related version
+    syslog.log({level = 5, category = "Panic"}, "Kernel panic:", message)
     return oldpanic(message)
 end
+
+syslog.log("Initialized system logger")
 
 --#endregion
 
@@ -864,12 +938,12 @@ function syscalls.lockmutex(process, thread, mtx)
             thread.filter = function(process, thread)
                 return mtx.owner == nil or mtx.owner == thread.id
             end
-            return kSyscallYield, "lockmutex"
+            return kSyscallYield, "lockmutex", mtx
         elseif mtx.recursive then
             mtx.recursive = mtx.recursive + 1
         else error("cannot recursively lock mutex", 0) end
     else
-        mtx.owner = process.id
+        mtx.owner = thread.id
         if mtx.recursive then mtx.recursive = 1 end
     end
 end
@@ -877,7 +951,7 @@ end
 function syscalls.unlockmutex(process, thread, mtx)
     expect(1, mtx, "table")
     if not getmetatable(mtx) or getmetatable(mtx).__name ~= "mutex" then error("bad argument #1 (expected mutex, got table)", 0) end
-    if mtx.owner == process.owner then
+    if mtx.owner == thread.id then
         if mtx.recursive then
             mtx.recursive = mtx.recursive - 1
             if mtx.recursive == 0 then mtx.owner = nil end
@@ -926,5 +1000,90 @@ end
 --#endregion
 
 --#region Main loop execution
+
+-- temp mount
+mounts[""] = filesystems[args.rootfs]:new(KERNEL, args.root)
+G.term = term
+syslogs.default.file = filesystem.open(KERNEL, "/var/log/default.log", "a")
+syslog.log("Starting init")
+
+local empty_packed_table = {n = 0}
+local init_ok, init_pid
+if args.init then
+    init_ok, init_pid = pcall(syscalls.exec, KERNEL, nil, args.init)
+end
+if not init_ok then
+    syslog.log("Could not find provided init, trying default locations")
+    for _,v in ipairs{"/sbin/init", "/etc/init", "/bin/init", "/bin/sh"} do
+        syslog.log("Trying", v)
+        init_ok, init_pid = pcall(syscalls.exec, KERNEL, nil, v)
+        if init_ok then break end
+    end
+    if not init_ok then panic("No working init found") end
+end
+local event_queue = {front = 0, back = 0, [0] = empty_packed_table}
+local allWaiting = false
+local init_retval
+
+while processes[init_pid] do
+    if not allWaiting then os.queueEvent("__event_queue_back") end
+    while true do
+        local ev = table.pack(coroutine.yield())
+        if ev[1] == "__event_queue_back" then break end
+        event_queue[event_queue.back+1] = ev
+        event_queue.back = event_queue.back + 1
+    end
+    local ev = event_queue[event_queue.front] or empty_packed_table
+    event_queue.front = event_queue.front + 1
+    allWaiting = true
+    for pid, process in pairs(processes) do if pid ~= 0 then
+        local dead = true
+        for tid, thread in pairs(process.threads) do
+            local args
+            if thread.status == "starting" then args = thread.args
+            elseif thread.status == "syscall" then args = thread.syscall_return
+            elseif thread.status == "preempt" then args = empty_packed_table
+            elseif thread.status == "suspended" then args = ev end
+            if thread.status ~= "dead" and (not thread.filter or thread.filter(process, thread, ev)) then
+                local old_dead = dead
+                dead = false
+                thread.filter = nil
+                if thread.yielding then thread.syscall_return = table.pack(pcall(syscalls[thread.yielding], process, thread, table.unpack(thread.syscall_return, 4, thread.syscall_return.n))) end
+                local params = table.pack(coroutine.resume(thread.coro, table.unpack(args, 1, args.n)))
+                if params[2] == "syscall" then
+                    thread.status = "syscall"
+                    allWaiting = false
+                    if params[3] and syscalls[params[3]] then
+                        thread.syscall_return = table.pack(pcall(syscalls[params[3]], process, thread, table.unpack(params, 4, params.n)))
+                        if not thread.syscall_return[1] and type(thread.syscall_return[2]) == "string" then thread.syscall_return[2] = thread.syscall_return[2]:gsub("kernel:%d+: ", "") end
+                        if thread.syscall_return[2] == kSyscallYield then thread.yielding = thread.syscall_return[3] end
+                    else thread.syscall_return = {false, "No such syscall", n = 2} end
+                elseif params[2] == "preempt" then
+                    thread.status = "preempt"
+                    allWaiting = false
+                elseif coroutine.status(thread.coro) == "dead" then
+                    thread.status = "dead"
+                    thread.return_value = params[2]
+                    if not params[1] then syslog.log({level = 4, process = pid, thread = tid, category = "Application Error"}, params[2]) end
+                    -- TODO: handle reaping?
+                    dead = old_dead
+                else
+                    thread.status = "suspended"
+                end
+            end
+        end
+        if dead and pid == init_pid then
+            init_retval = process.threads[0].return_value
+            processes[pid] = nil
+        end
+    end end
+end
+
+if init_retval ~= nil then
+    term.setTextColor(16384)
+    term.write(tostring(init_retval))
+    term.setCursorPos(1, select(2, term.getCursorPos()) + 1)
+end
+panic("init program exited")
 
 --#endregion
