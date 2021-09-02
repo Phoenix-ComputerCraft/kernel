@@ -50,7 +50,7 @@ function _G.term.native()
     term.setCursorPos(1, 1)
     term.setCursorBlink(true)
     term.clear()
-    local file = fs.open("/boot/kernel.lua", "r")
+    local file = fs.open("/root/boot/kernel.lua", "r")
     if file == nil then
         term.setCursorBlink(false)
         term.setTextColor(16384)
