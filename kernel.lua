@@ -33,6 +33,8 @@ terminal = {}
 user = {}
 syslog = {}
 
+-- ==== LOADER ====
+
 for _, v in ipairs(fs.list(fs.combine(args.root, args.splitkernpath))) do
     local file, err = fs.open(fs.combine(args.root, args.splitkernpath, v), "rb")
     if not file then panic("Could not read kernel part " .. v .. ": " .. err) end
@@ -41,6 +43,8 @@ for _, v in ipairs(fs.list(fs.combine(args.root, args.splitkernpath))) do
     if not fn then panic("Could not load kernel part " .. v .. ": " .. err) end
     fn()
 end
+
+-- == END LOADER ==
 
 if init_retval ~= nil then
     term.setTextColor(16384)

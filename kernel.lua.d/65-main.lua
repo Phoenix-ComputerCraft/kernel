@@ -22,7 +22,6 @@ if not init_ok then
 end
 local event_queue = {front = 0, back = 0, [0] = empty_packed_table}
 local allWaiting = false
-local init_retval
 
 while processes[init_pid] do
     if not allWaiting then os.queueEvent("__event_queue_back") end
