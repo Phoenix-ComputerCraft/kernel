@@ -85,6 +85,71 @@ if loadstring and setfenv then
     loadstring = nil
 end
 
+-- Remove bit and apply bit32, as this is a Lua 5.2 environment.
+if bit then
+    if not bit32 then
+        local bit = bit
+        bit32 = {
+           bnot = bit.bnot,
+           lshift = bit.blshift,
+           rshift = bit.blogic_rshift,
+           arshift = bit.brshift
+        }
+        function bit32.band(x, y, ...)
+            expect(1, x, "number")
+            expect(2, y, "number", "nil")
+            if not y then return x end
+            return bit32.band(bit.band(x, y), ...)
+        end
+        function bit32.bor(x, y, ...)
+            expect(1, x, "number")
+            expect(2, y, "number", "nil")
+            if not y then return x end
+            return bit32.bor(bit.bor(x, y), ...)
+        end
+        function bit32.bxor(x, y, ...)
+            expect(1, x, "number")
+            expect(2, y, "number", "nil")
+            if not y then return x end
+            return bit32.bxor(bit.bxor(x, y), ...)
+        end
+        function bit32.btest(...)
+            return bit32.band(...) ~= 0
+        end
+        function bit32.extract(n, field, width)
+            expect(1, n, "number")
+            expect(2, field, "number")
+            expect(3, width, "number", "nil");
+            (expect.range or function() end)(field, 0, 31);
+            (expect.range or function() end)(field + width - 1, 0, 31)
+            width = width or 1
+            local res = 0
+            for i = field + width - 1, field, -1 do
+                res = res * 2 + (bit.band(n, 2^i) / 2^i)
+            end
+            return res
+        end
+        function bit32.replace(n, v, field, width)
+            expect(1, n, "number")
+            expect(2, v, "number")
+            expect(3, field, "number")
+            expect(4, width, "number", "nil");
+            (expect.range or function() end)(field, 0, 31);
+            (expect.range or function() end)(field + width - 1, 0, 31)
+            width = width or 1
+            local mask = 2^width - 1
+            return bit.bor(bit.band(n, bit.bnot(bit.blshift(mask, field))), bit.blshift(bit.band(v, mask), field))
+        end
+        function bit32.lrotate(x, disp)
+            return bit.bor(bit.blshift(x, disp), bit.blogic_rshift(x, 32-disp))
+        end
+        function bit32.rrotate(x, disp)
+            return bit.bor(bit.blogic_rshift(x, disp), bit.blshift(x, 32-disp))
+        end
+    end
+    bit = nil
+end
+
 -- Early version of panic function, before log initialization finishes (this is redefined later to use syslog)
 function panic(message)
     term.setBackgroundColor(32768)
@@ -282,6 +347,24 @@ do
         return n_setfenv(f, tab)
     end
 
+    if d_getfenv then
+        function debug.getfenv(o)
+            if type(o) == "function" then
+                local caller = getinfo(2, "f")
+                if protectedObjects[o] and not (caller and protectedObjects[o][caller.func]) then return nil end
+            end
+            return d_getfenv(o)
+        end
+    
+        function debug.setfenv(o, tab)
+            if type(o) == "function" then
+                local caller = getinfo(2, "f")
+                if protectedObjects[o] and not (caller and protectedObjects[o][caller.func]) then error("attempt to set environment of protected function", 2) end
+            end
+            return d_setfenv(o, tab)
+        end
+    end
+
     if upvaluejoin then
         function debug.upvaluejoin(f1, n1, f2, n2)
             if type(f1) == "function" and type(f2) == "function" then
@@ -386,10 +469,14 @@ filesystems = {
     drivefs = {}
 }
 
-local file = fs.open("/meta.ltn", "r")
-if file then
-    filesystems.craftos.meta = unserialize(file.readAll())
-    file.close()
+-- craftos fs implementation
+
+do
+    local file = fs.open("/meta.ltn", "r")
+    if file then
+        filesystems.craftos.meta = unserialize(file.readAll())
+        file.close()
+    end
 end
 
 function filesystems.craftos:getmeta(user, path)
@@ -440,8 +527,13 @@ function filesystems.craftos:setmeta(user, path, meta)
 end
 
 function filesystems.craftos:new(process, path, options)
+    expect.field(options, "ro", "boolean", "nil")
+    -- CraftOS mounts will always require root
+    if process.user ~= "root" then error("Could not mount " .. path .. ": Permission denied", 3)
+    elseif not fs.isDir(path) then error("Could not mount " .. path .. ": No such directory", 3) end
     return setmetatable({
-        path = path
+        path = path,
+        readOnly = options.ro
     }, {__index = self})
 end
 
@@ -449,7 +541,8 @@ function filesystems.craftos:open(process, path, mode)
     local ok, stat = pcall(self.stat, self, process, path)
     if not ok then return nil, stat
     elseif not stat then
-        if mode:sub(1, 1) == "w" then
+        if mode:sub(1, 1) == "w" or mode:sub(1, 1) == "a" then
+            if self.readOnly then return nil, "Read-only filesystem" end
             local pok, pstat = pcall(self.stat, self, process, fs.getDir(path))
             if not pok then
                 local mok, err = pcall(self.mkdir, self, process, fs.getDir(path))
@@ -520,14 +613,40 @@ function filesystems.craftos:stat(process, path)
 end
 
 function filesystems.craftos:remove(process, path)
-
+    if self.readOnly then error(path .. ": Read-only filesystem", 2) end
+    local stat = self:stat(process, path)
+    if not stat then return end
+    local function checkWriteRecursive(p)
+        local s = self:stat(process, p)
+        local perms = s.permissions[process.user] or s.worldPermissions
+        if not perms.write then error(p .. ": Permission denied", 3) end
+        if s.type == "directory" then
+            if not perms.read then error(p .. ": Permission denied", 3) end
+            for _, v in ipairs(fs.list(fs.combine(self.path, p))) do checkWriteRecursive(fs.combine(p, v)) end
+        end
+    end
+    checkWriteRecursive(path)
+    fs.remove(fs.combine(self.path, path))
 end
 
 function filesystems.craftos:rename(process, from, to)
-
+    if self.readOnly then error("Read-only filesystem", 2) end
+    local fromstat = self:stat(process, from)
+    local tostat = self:stat(process, to)
+    if not fromstat then error(from .. ": No such file or directory", 2)
+    elseif tostat then error(to .. ": " .. tostat.type:gsub("%w", string.upper, 1) .. " already exists", 2) end
+    tostat = self:stat(process, fs.getDir(to))
+    if not tostat then
+        self:mkdir(process, fs.getDir(to))
+        tostat = self:stat(process, fs.getDir(to))
+    end
+    local perms = tostat.permissions[process.user] or tostat.worldPermissions
+    if not perms.write then error(to .. ": Permission denied", 2) end
+    fs.move(fs.combine(self.path, from), fs.combine(self.path, to))
 end
 
 function filesystems.craftos:mkdir(process, path)
+    if self.readOnly then error(path .. ": Read-only filesystem", 2) end
     local stat = self:stat(process, path)
     if stat then
         if stat.type == "directory" then return
@@ -563,6 +682,7 @@ function filesystems.craftos:mkdir(process, path)
 end
 
 function filesystems.craftos:chmod(process, path, user, mode)
+    if self.readOnly then error(path .. ": Read-only filesystem", 2) end
     local stat = self:stat(process, path)
     if not stat then error(path .. ": No such file or directory", 2) end
     if not stat.owner or (process.user ~= "root" and process.user ~= stat.owner) then error(path .. ": Permission denied", 2) end
@@ -615,12 +735,55 @@ function filesystems.craftos:chmod(process, path, user, mode)
 end
 
 function filesystems.craftos:chown(process, path, owner)
+    if self.readOnly then error(path .. ": Read-only filesystem", 2) end
     local stat = self:stat(process, path)
     if not stat then error(path .. ": No such file or directory", 2) end
     if not stat.owner or (process.user ~= "root" and process.user ~= stat.owner) then error(path .. ": Permission denied", 2) end
     stat.owner = owner
     self:setmeta(process.user, fs.combine(self.path, path), deepcopy(stat))
 end
+
+-- tmpfs implementation
+
+function filesystems.tmpfs:new(process, src, options)
+    return setmetatable({data = {}}, {__index = self})
+end
+
+function filesystems.tmpfs:open(process, path, mode)
+    
+end
+
+function filesystems.tmpfs:list(process, path)
+
+end
+
+function filesystems.tmpfs:stat(process, path)
+
+end
+
+function filesystems.tmpfs:remove(process, path)
+
+end
+
+function filesystems.tmpfs:rename(process, from, to)
+
+end
+
+function filesystems.tmpfs:mkdir(process, path)
+
+end
+
+function filesystems.tmpfs:chmod(process, path, user, mode)
+
+end
+
+function filesystems.tmpfs:chown(process, path, owner)
+
+end
+
+-- drivefs implementation
+
+-- Syscalls
 
 local function getMount(process, path)
     local fullPath = split(fs.combine(path:sub(1, 1) == "/" and "" or process.dir, path), "/\\")
@@ -712,13 +875,23 @@ function filesystem.mount(process, type, src, dest, options)
     expect(2, src, "string")
     expect(3, dest, "string")
     expect(4, options, "table", "nil")
-
+    if not filesystems[type] then error("No such filesystem '" .. type .. "'", 2) end
+    local stat = filesystem.stat(process, dest)
+    if not stat then error("Could not mount to " .. dest .. ": No such directory", 2)
+    elseif stat.type ~= "directory" then error("Could not mount to " .. dest .. ": Not a directory", 2)
+    elseif not (stat.permissions[process.user] or stat.worldPermissions).write then error("Could not mount to " .. dest .. ": Permission denied", 2) end
+    local mount = filesystems[type]:new(process, src, options or {})
+    mounts[fs.combine(dest)] = mount
 end
 
 function filesystem.unmount(process, path)
     expect(0, process, "table")
     expect(1, path, "string")
-
+    if not mounts[fs.combine(path)] then error(path .. ": No such mount", 2) end
+    local stat = mounts[fs.combine(path)]:stat(process, "")
+    if not stat then error("Internal error in unmount: could not get stat for root! Please report this to the maintainer of the target filesystem.", 2)
+    elseif not (stat.permissions[process.user] or stat.worldPermissions).write then error(path .. ": Permission denied", 2) end
+    mounts[fs.combine(path)] = nil
 end
 
 function filesystem.combine(...)
@@ -779,16 +952,77 @@ for _,v in ipairs{"assert", "error", "getfenv", "getmetatable", "ipairs", "next"
     "pairs", "pcall", "rawequal", "rawget", "rawset", "select", "setfenv",
     "setmetatable", "tonumber", "tostring", "type", "_VERSION", "xpcall"} do G[v] = _G[v] end
 
+-- We can't use any kernel-level globals like `expect` here, so argument checks will be manual.
+-- Normally using upvalues wouldn't be allowed either, but dbprotect blocks access so it should be alright.
+
 function G.dofile(path)
-
+    if type(path) ~= "string" then error("bad argument #1 (expected string, got " .. type(path) .. ")", 2) end
+    local fn, err = loadfile(path, nil, _G)
+    if not fn then error(err, 2) end
+    return fn()
 end
 
-function G.load(chunk, name, type, env)
+if loadstring and _VERSION == "Lua 5.1" then
+    local _load, _loadstring = load, loadstring
+    function G.load(chunk, name, mode, env)
+        if name ~= nil and type(name) ~= "string" then error("bad argument #2 (expected string, got " .. type(name) .. ")", 2) end
+        if mode ~= nil and type(mode) ~= "string" then error("bad argument #3 (expected string, got " .. type(mode) .. ")", 2) end
+        if env ~= nil and type(env) ~= "table" then error("bad argument #4 (expected table, got " .. type(env) .. ")", 2) end
+        local fn, err
+        if type(chunk) == "string" then
+            if mode then
+                if chunk:sub(1, 4) == "\033Lua" then if not mode:find("b") then error("attempt to load a binary chunk (mode is '" .. mode .. "')", 2) end
+                elseif not mode:find("t") then error("attempt to load a text chunk (mode is '" .. mode .. "')", 2) end
+            end
+            fn, err = _loadstring(chunk, name)
+        elseif type(chunk) == "function" then
+            if mode then
+                local cf, init = chunk, ""
+                while #init < 4 do
+                    local s = cf()
+                    if not s then break end
+                    init = init .. s
+                end
+                if init:sub(1, 4) == "\033Lua" then if not mode:find("b") then error("attempt to load a binary chunk (mode is '" .. mode .. "')", 2) end
+                elseif not mode:find("t") then error("attempt to load a text chunk (mode is '" .. mode .. "')", 2) end
+                function chunk()
+                    if init then
+                        local a = init
+                        init = nil
+                        return a
+                    else return cf() end
+                end
+            end
+            fn, err = _load(chunk, name)
+        else error("bad argument #1 (expected string or function, got " .. type(chunk) .. ")", 2) end
+        if not fn then return nil, err end
+        local mt = getmetatable(env)
+        if not mt then mt = {} setmetatable(env, mt) end
+        local __index, __newindex = mt.__index, mt.__newindex
+        function mt:__index(idx)
+            if idx == "_ENV" then return getfenv(2)
+            elseif type(__index) == "table" then return __index[idx]
+            elseif type(__index) == "function" then return __index(self, idx) end
+        end
+        function mt:__newindex(idx, val)
+            if idx == "_ENV" then setfenv(2, val)
+            elseif type(__newindex) == "function" then return __newindex(self, idx, val) end
+        end
+        setfenv(fn, env)
+        return fn
+    end
+else G.load = load end
 
-end
-
-function G.loadfile(path, env, name)
-
+function G.loadfile(path, mode, env)
+    if env == nil and type(mode) == "table" then env, mode = mode, nil end
+    if type(path) ~= "string" then error("bad argument #1 (expected string, got " .. type(path) .. ")", 2) end
+    if mode ~= nil and type(mode) ~= "string" then error("bad argument #2 (expected string, got " .. type(mode) .. ")", 2) end
+    if env ~= nil and type(env) ~= "table" then error("bad argument #3 (expected table, got " .. type(env) .. ")", 2) end
+    local file, err = do_syscall("open", path, "rb")
+    if not file then error(err, 2) end
+    local data = file.readAll()
+    file.close()
+    return load(data, "@" .. path, mode, env)
 end
 
 function G.print(...)
@@ -816,41 +1050,193 @@ if not G.table.pack then G.table.pack = function(...)
 end end
 if not G.table.unpack then G.table.unpack = unpack end
 
+local stdin_buffer = ""
+local io_stdin = {
+    close = function() end,
+    lines = function(self, ...)
+        local args = table.pack(...)
+        return function() return self:read(table.unpack(args, 1, args.n)) end
+    end,
+    read = function(self, fmt, ...)
+        local s, e
+        if type(fmt) == "number" then while #stdin_buffer < fmt do stdin_buffer = stdin_buffer .. do_syscall("read") end
+        elseif type(fmt) == "string" then
+            fmt = fmt:gsub("^%*", "")
+            if fmt == "n" then
+                while not stdin_buffer:find("%d") do
+                    local r = do_syscall("read")
+                    if r == nil then break end
+                    stdin_buffer = stdin_buffer .. do_syscall("read")
+                end
+            elseif fmt == "a" then
+                while true do
+                    local r = do_syscall("read")
+                    if r == nil then break end
+                    stdin_buffer = stdin_buffer .. do_syscall("read")
+                end
+            elseif fmt == "l" or fmt == "L" then
+                while not stdin_buffer:find("\n") do
+                    local r = do_syscall("read")
+                    if r == nil then break end
+                    stdin_buffer = stdin_buffer .. do_syscall("read")
+                end
+            else error("bad argument (invalid format '" .. fmt .. "')", 2) end
+        else error("bad argument (expected string or number, got " .. type(fmt), 2) end
+        if type(fmt) == "number" then s, e = stdin_buffer:sub(1, fmt), fmt + 1
+        elseif fmt == "n" then s, e = stdin_buffer:match("(%d)()")
+        elseif fmt == "a" then s, e = stdin_buffer, #stdin_buffer + 1
+        elseif fmt == "l" then s, e = stdin_buffer:match("(.*)\n()")
+        else s, e = stdin_buffer:match("(.*\n)()") end
+        stdin_buffer = stdin_buffer:sub(e)
+        if select("#", ...) > 0 then return s, self:read(...)
+        else return s end
+    end,
+    seek = function() return nil, "Cannot seek default file" end,
+    setvbuf = function() end
+}
+local io_stdout = {
+    close = function() end,
+    flush = function() end,
+    seek = function() return nil, "Cannot seek default file" end,
+    setvbuf = function() end,
+    write = function(self, ...)
+        do_syscall("write", ...)
+        return self
+    end
+}
+local io_stderr = {
+    close = function() end,
+    flush = function() end,
+    seek = function() return nil, "Cannot seek default file" end,
+    setvbuf = function() end,
+    write = function(self, ...)
+        do_syscall("writeerr", ...)
+        return self
+    end
+}
+local io_input, io_output = io_stdin, io_stdout
+
+local io_infile = {
+    close = function(self)
+        self._file.close()
+        self._closed = true
+    end,
+    lines = function(self, ...)
+        local args = table.pack(...)
+        return function() return self:read(table.unpack(args, 1, args.n)) end
+    end,
+    read = function(self, fmt, ...)
+        local v
+        if type(fmt) == "number" then v = self._file.read(fmt)
+        elseif type(fmt) == "string" then
+            fmt = fmt:gsub("^%*", "")
+            if fmt == "a" then v = self._file.readAll()
+            elseif fmt == "l" then v = self._file.readLine(false)
+            elseif fmt == "L" then v = self._file.readLine(true)
+            elseif fmt == "n" then
+                local s, c = ""
+                repeat c = self._file.read(1) until c:match("%d")
+                while c:match("%d") do s, c = s .. c, self._file.read(1) end
+                v = tonumber(s)
+            else error("bad argument (invalid format '" .. fmt .. "')", 2) end
+        else error("bad argument (expected string or number, got " .. type(fmt) .. ")", 2) end
+        if select("#", ...) > 0 then return v, self:read(...)
+        else return v end
+    end,
+    seek = function(self, whence, offset)
+        if self._file.seek then return self._file.seek(whence, offset)
+        else return nil, "Cannot seek text file" end
+    end,
+    setvbuf = function() end
+}
+local io_outfile = {
+    close = function(self)
+        self._file.close()
+        self._closed = true
+    end,
+    flush = function(self)
+        self._file:flush()
+    end,
+    seek = function(self, whence, offset)
+        if self._file.seek then return self._file.seek(whence, offset)
+        else return nil, "Cannot seek text file" end
+    end,
+    setvbuf = function() end,
+    write = function(self, ...)
+        self._file.write(...)
+        return self
+    end
+}
+
 G.io = {
     close = function(file)
-
+        if file == nil then io_output:close()
+        elseif type(file) == "table" and getmetatable(file) and getmetatable(file).__name == "FILE*" then file:close()
+        else error("bad argument #1 (expected FILE*, got " .. type(file) .. ")", 2) end
     end,
     flush = function()
-
+        return io_output:flush()
     end,
     input = function(file)
-
+        if file == nil then return io_input
+        elseif type(file) == "string" then
+            local h, err = io.open(file, "r")
+            if not h then error(err, 2) end
+            io_input = h
+        elseif type(file) == "table" and getmetatable(file) and getmetatable(file).__name == "FILE*" then io_input = file
+        else error("bad argument #1 (expected string or FILE*, got " .. type(file) .. ")", 2) end
     end,
-    lines = function(filename)
-
+    lines = function(filename, ...)
+        if filename == nil then return io_input:lines(...) end
+        if type(filename) ~= "string" then error("bad argument #1 (expected string, got " .. type(filename) .. ")", 2) end
+        local h, err = io.open(filename, "r")
+        if not h then error(err, 2) end
+        local fn = h:lines(...)
+        return function(...)
+            local retval = table.pack(fn(...))
+            if retval.n == 0 or retval[1] == nil then h:close() end
+            return table.unpack(retval, 1, retval.n)
+        end
     end,
     open = function(filename, mode)
-
+        if type(filename) ~= "string" then error("bad argument #1 (expected string, got " .. type(filename) .. ")", 2) end
+        if type(mode) ~= "string" then error("bad argument #2 (expected string, got " .. type(mode) .. ")", 2) end
+        local file, err = do_syscall("open", filename, mode)
+        if not file then return nil, err
+        elseif mode:find("r") then return setmetatable({_file = file}, {__index = io_outfile, __name = "FILE*"})
+        else return setmetatable({_file = file}, {__index = io_infile, __name = "FILE*"}) end
     end,
     output = function(file)
-
+        if file == nil then return io_output
+        elseif type(file) == "string" then
+            local h, err = io.open(file, "w")
+            if not h then error(err, 2) end
+            io_output = h
+        elseif type(file) == "table" and getmetatable(file) and getmetatable(file).__name == "FILE*" then io_output = file
+        else error("bad argument #1 (expected string or FILE*, got " .. type(file) .. ")", 2) end
     end,
     popen = function(path, mode)
-
+        -- TODO
     end,
     read = function(...)
-
+        return io_input:read(...)
     end,
     tmpfile = function()
-
+        -- TODO: make files delete on exit
+        return io.open(os.tmpname(), "a")
     end,
     type = function(obj)
-
+        if type(obj) == "table" and getmetatable(obj) and getmetatable(obj).__name == "FILE*" then
+            if obj._closed then return "closed file" else return "file" end
+        else return nil end
     end,
     write = function(...)
-
-    end
-} -- TODO: provide stdin/out/err
+        return io_output:write(...)
+    end,
+    stdin = io_stdin,
+    stdout = io_stdout,
+    stderr = io_stderr
+}
 
 -- Nicely, we're providing a real `os` implementation instead of the jumbled mess CC gives us
 local oldos = os
@@ -859,7 +1245,9 @@ G.os = {
     date = os.date,
     difftime = function(a, b) return a - b end,
     execute = function(path)
-        -- TODO
+        -- TODO: make `wait` work
+        local pid = do_syscall("exec", "/bin/sh", "-c", path)
+        return do_syscall("wait", pid)
     end,
     exit = function(code)
         do_syscall("exit", code)
