@@ -1,5 +1,5 @@
 -- temp mount
-mounts[""] = filesystems[args.rootfs]:new(KERNEL, args.root, {})
+mounts[""] = filesystems[args.rootfstype]:new(KERNEL, args.root, {})
 G.term = term
 syslogs.default.file = filesystem.open(KERNEL, "/var/log/default.log", "a")
 syslog.log("Starting init")
@@ -36,6 +36,7 @@ while processes[init_pid] do
         --syslog.debug(event_queue.front, event_queue.back, table.unpack(ev, 1, ev.n))
         event_queue.front = event_queue.front + 1
     else ev = empty_packed_table end
+    if eventHooks[ev[1]] then for _, v in ipairs(eventHooks[ev[1]]) do v(ev) end end
     if ev[1] == "key" and ev[2] == 68 then -- F10 (TODO: get real keys API)
         term.clear()
         term.setCursorPos(1, 1)

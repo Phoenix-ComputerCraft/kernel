@@ -7,10 +7,12 @@
 args = {
     init = "/sbin/init.lua",
     root = "/root",
-    rootfs = "craftos",
+    rootfstype = "craftos",
     preemptive = true,
     quantum = 2000,
-    splitkernpath = "/boot/kernel.lua.d"
+    splitkernpath = "/boot/kernel.lua.d",
+    loglevel = 0,
+    console = "tty1"
 }
 
 syscalls = {}
@@ -32,6 +34,8 @@ filesystem = {}
 terminal = {}
 user = {}
 syslog = {}
+
+eventHooks = {}
 
 -- ==== LOADER ====
 

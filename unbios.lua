@@ -16,7 +16,11 @@ local keptAPIs = {bit32 = true, bit = true, ccemux = true, config = true, corout
 local t = {}
 for k in pairs(_G) do if not keptAPIs[k] then table.insert(t, k) end end
 for _,k in ipairs(t) do _G[k] = nil end
-_G.term = _G.term.native()
+local native = _G.term.native()
+for _, method in ipairs { "nativePaletteColor", "nativePaletteColour", "screenshot" } do
+    native[method] = _G.term[method]
+end
+_G.term = native
 _G.http.checkURL = _G.http.checkURLAsync
 _G.http.websocket = _G.http.websocketAsync
 local delete = {os = {"version", "pullEventRaw", "pullEvent", "run", "loadAPI", "unloadAPI", "sleep"}, http = {"get", "post", "put", "delete", "patch", "options", "head", "trace", "listen", "checkURLAsync", "websocketAsync"}, fs = {"complete", "isDriveRoot"}}

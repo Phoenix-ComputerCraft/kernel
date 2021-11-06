@@ -2,7 +2,9 @@ syslogs = {
     default = {
         --file = filesystem.open(KERNEL, "/var/log/default.log", "a"),
         stream = {},
-        --tty = {} -- console (tty0)
+        tty = KERNEL.stdout, -- console (tty0)
+        tty_level = args.loglevel,
+        colorize = true
     }
 }
 
@@ -15,6 +17,8 @@ local loglevels = {
     "Critical",
     "Panic"
 }
+
+local logcolors = {[0] = '\27[90m', '\27[97m', '\27[37m', '\27[93m', '\27[31m', '\27[96m', '\27[33m'}
 
 local function concat(t, sep, i, j)
     if i == j then return tostring(t[i])
@@ -148,8 +152,21 @@ function syscalls.syslog(process, thread, options, ...)
         end
     end
     if log.tty and log.tty_level <= options.level then
-        -- Do terminal writing (TODO)
-        --log.tty.write(message)
+        if log.tty.isTTY then
+            terminal.write(log.tty, ("%s[%s]%s %s[%d%s]%s [%s]: %s%s\n"):format(
+                log.colorize and logcolors[options.level] or "",
+                os.date("%b %d %X", options.time / 1000),
+                options.category and " <" .. options.category .. ">" or "",
+                processes[options.process] and processes[options.process].name or "(unknown)",
+                options.process,
+                options.thread and ":" .. options.thread or "",
+                options.module and " (" .. options.module .. ")" or "",
+                loglevels[options.level],
+                concat(args, " ", 1, args.n),
+                log.colorize and "\27[0m" or ""
+            ))
+            terminal.redraw(log.tty)
+        else end
     end
 end
 

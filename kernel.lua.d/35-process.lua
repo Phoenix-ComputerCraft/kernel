@@ -7,9 +7,9 @@ local process_template = {
     },
     parent = 0,
     dir = "/",
-    stdin = "tty0",
+    stdin = TTY[1],
     stdout = {}, -- pipe
-    stderr = "tty0",
+    stderr = TTY[1],
     cputime = 0.2,
     env = {},
     syscallyield = nil,
