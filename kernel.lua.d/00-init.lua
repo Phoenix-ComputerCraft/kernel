@@ -22,6 +22,24 @@ do
     serialize, unserialize = env.serialize, env.unserialize
 end
 
+-- We need the keys API from CraftOS to be able to meaningfully decipher key constants.
+do
+    local file = fs.open("/rom/apis/keys.lua", "r")
+    local env = setmetatable({}, {__index = _G})
+    if _VERSION < "Lua 5.2" then env._ENV = env end
+    local fn
+    if loadstring and setfenv then
+        fn = loadstring(file.readAll(), "@/rom/apis/keys.lua")
+        setfenv(fn, env)
+    else
+        fn = load(file.readAll(), "@/rom/apis/keys.lua", "t", env)
+    end
+    file.close()
+    fn()
+    keys = {}
+    for k,v in pairs(env) do keys[k] = v end
+end
+
 -- load is the de facto loader - loadstring will no longer be available. Since load isn't available on 5.1 (at least for strings), we shim it first.
 if loadstring and setfenv then
     local old_load, old_loadstring = load, loadstring

@@ -864,8 +864,10 @@ function filesystem.unmount(process, path)
     mounts[fs.combine(path)] = nil
 end
 
-function filesystem.combine(...)
-    return fs.combine(...)
+function filesystem.combine(first, ...)
+    local str = fs.combine(first, ...)
+    if first:match "^/" then str = "/" .. str end
+    return str
 end
 
 function syscalls.open(process, thread, ...) return filesystem.open(process, ...) end

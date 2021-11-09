@@ -1,8 +1,7 @@
 -- temp mount
 mounts[""] = filesystems[args.rootfstype]:new(KERNEL, args.root, {})
-G.term = term
+G.periphemu = periphemu
 syslogs.default.file = filesystem.open(KERNEL, "/var/log/default.log", "a")
-syslog.log("Starting init")
 
 local empty_packed_table = {n = 0}
 local init_ok, init_pid
@@ -20,6 +19,7 @@ if not init_ok then
     end
     if not init_ok then panic("No working init found") end
 end
+syslog.log("Starting init from " .. processes[init_pid].name)
 local event_queue = {front = 0, back = 0, [0] = empty_packed_table}
 local allWaiting = false
 
@@ -27,9 +27,10 @@ while processes[init_pid] do
     if not allWaiting then os.queueEvent("__event_queue_back") end
     while true do
         local ev = table.pack(coroutine.yield())
-        if allWaiting or ev[1] == "__event_queue_back" then break end
+        if ev[1] == "__event_queue_back" then break end
         event_queue[event_queue.back+1] = ev
         event_queue.back = event_queue.back + 1
+        if allWaiting then break end
     end
     local ev = event_queue[event_queue.front]
     if ev then
@@ -37,7 +38,7 @@ while processes[init_pid] do
         event_queue.front = event_queue.front + 1
     else ev = empty_packed_table end
     if eventHooks[ev[1]] then for _, v in ipairs(eventHooks[ev[1]]) do v(ev) end end
-    if ev[1] == "key" and ev[2] == 68 then -- F10 (TODO: get real keys API)
+    if ev[1] == "key" and ev[2] == keys.f10 then -- F10 (TODO: get real keys API)
         term.clear()
         term.setCursorPos(1, 1)
         term.write("Entering debug console.")
@@ -111,6 +112,28 @@ while processes[init_pid] do
         term.setCursorBlink(false)
         term.clear()
     end
+    if ev[1] == "char" then
+        if currentTTY.flags.cbreak then currentTTY.buffer = currentTTY.buffer .. ev[2]
+        else currentTTY.preBuffer = currentTTY.preBuffer .. ev[2] end
+        if currentTTY.flags.echo then terminal.write(currentTTY, ev[2]) terminal.redraw(currentTTY) end
+    elseif ev[1] == "key" then
+        if ev[2] == keys.enter then
+            if currentTTY.flags.cbreak then
+                currentTTY.buffer = currentTTY.buffer .. "\n"
+            else
+                currentTTY.buffer = currentTTY.buffer .. currentTTY.preBuffer .. "\n"
+                currentTTY.preBuffer = ""
+            end
+            if currentTTY.flags.echo then terminal.write(currentTTY, "\n") terminal.redraw(currentTTY) end
+        elseif ev[2] == keys.backspace then
+            if currentTTY.flags.cbreak then
+                
+            elseif #currentTTY.preBuffer > 0 then
+                currentTTY.preBuffer = currentTTY.preBuffer:sub(1, -2)
+                if currentTTY.flags.echo then terminal.write(currentTTY, "\b \b") terminal.redraw(currentTTY) end
+            end
+        end
+    end
     allWaiting = true
     for pid, process in pairs(processes) do if pid ~= 0 then
         local dead = true
@@ -139,6 +162,7 @@ while processes[init_pid] do
                 if params[2] == "syscall" then
                     --syslog.debug("Calling syscall", params[3])
                     thread.status = "syscall"
+                    local oldAllWaiting = allWaiting
                     allWaiting = false
                     if params[3] and syscalls[params[3]] then
                         thread.syscall_return = table.pack(pcall(syscalls[params[3]], process, thread, table.unpack(params, 4, params.n)))
@@ -146,7 +170,10 @@ while processes[init_pid] do
                             syslog.log({level = 0, category = "Syscall Failure", process = 0}, thread.syscall_return[2])
                             thread.syscall_return[2] = thread.syscall_return[2]:gsub("kernel:%d+: ", "")
                         end
-                        if thread.syscall_return[2] == kSyscallYield then thread.yielding = thread.syscall_return[3] end
+                        if thread.syscall_return[2] == kSyscallYield then
+                            thread.yielding = thread.syscall_return[3]
+                            allWaiting = oldAllWaiting
+                        end
                     else thread.syscall_return = {false, "No such syscall", n = 2} end
                 elseif params[2] == "preempt" then
                     thread.status = "preempt"
@@ -163,6 +190,9 @@ while processes[init_pid] do
                     thread.status = "suspended"
                 end
             end
+        end
+        if dead then
+            process.isDead = true
         end
         if dead and pid == init_pid then
             init_retval = process.threads[0].return_value

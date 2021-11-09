@@ -268,7 +268,14 @@ local oldpanic = panic
 function panic(message)
     -- TODO: Write the syslog-related version
     syslog.log({level = 5, category = "Panic"}, "Kernel panic:", message)
-    return oldpanic(message)
+    if debug then
+        local traceback = debug.traceback(nil, 2)
+        syslog.log({level = 5, category = "Panic"}, traceback)
+    end
+    syslog.log({level = 5, category = "Panic"}, "We are hanging here...")
+    while true do coroutine.yield() end
 end
 
 syslog.log("Initialized system logger")
+syslog.log("System started at " .. systemStartTime .. " on computer " .. os.computerID() .. (os.computerLabel() and "('" .. os.computerLabel() .. "')" or ""))
+syslog.log("Computer host is " .. _HOST)

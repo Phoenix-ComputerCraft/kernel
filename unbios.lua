@@ -10,7 +10,6 @@
 -- * `http.request`
 -- * `os.shutdown` and `os.reboot`
 -- Licensed under the MIT license
-if _HOST:find("UnBIOS") then return end
 local kernelArgs = table.pack(...)
 local keptAPIs = {bit32 = true, bit = true, ccemux = true, config = true, coroutine = true, debug = true, ffi = true, fs = true, http = true, io = true, jit = true, mounter = true, os = true, periphemu = true, peripheral = true, redstone = true, rs = true, term = true, _HOST = true, _CC_DEFAULT_SETTINGS = true, _CC_DISABLE_LUA51_FEATURES = true, _VERSION = true, assert = true, collectgarbage = true, error = true, gcinfo = true, getfenv = true, getmetatable = true, ipairs = true, loadstring = true, math = true, newproxy = true, next = true, pairs = true, pcall = true, rawequal = true, rawget = true, rawlen = true, rawset = true, select = true, setfenv = true, setmetatable = true, string = true, table = true, tonumber = true, tostring = true, type = true, unpack = true, xpcall = true, turtle = true, pocket = true, commands = true, _G = true}
 local t = {}
@@ -25,7 +24,6 @@ _G.http.checkURL = _G.http.checkURLAsync
 _G.http.websocket = _G.http.websocketAsync
 local delete = {os = {"version", "pullEventRaw", "pullEvent", "run", "loadAPI", "unloadAPI", "sleep"}, http = {"get", "post", "put", "delete", "patch", "options", "head", "trace", "listen", "checkURLAsync", "websocketAsync"}, fs = {"complete", "isDriveRoot"}}
 for k,v in pairs(delete) do for _,a in ipairs(v) do _G[k][a] = nil end end
-_G._HOST = _G._HOST .. " (UnBIOS)"
 -- Set up TLCO
 -- This functions by crashing `rednet.run` by removing `os.pullEventRaw`. Normally
 -- this would cause `parallel` to throw an error, but we replace `error` with an

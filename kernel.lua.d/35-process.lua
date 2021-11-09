@@ -68,6 +68,23 @@ function syscalls.getenv(process, thread)
     return process.env
 end
 
+function syscalls.getname(process, thread)
+    return process.name
+end
+
+function syscalls.getcwd(process, thread)
+    return process.dir
+end
+
+function syscalls.chdir(process, thread, dir)
+    expect(1, dir, "string")
+    local stat = filesystem.stat(process, dir)
+    if not stat or stat.type ~= "directory" then return false, "No such file or directory"
+    elseif not (stat.permissions[process.user] or stat.worldPermissions).execute then return false, "Permission denied" end
+    process.dir = dir:gsub("^([^/])", "/%1")
+    return true
+end
+
 function syscalls.fork(process, thread, func, name, ...)
     expect(1, func, "function")
     expect(2, name, "string", "nil")
@@ -131,7 +148,7 @@ function syscalls.exec(process, thread, path, ...)
             user = process.user,
             dependents = {},
             parent = process.id,
-            dir = fs.getDir(path),
+            dir = process.dir,
             stdin = process.stdin,
             stdout = process.stdout,
             stderr = process.stderr,
@@ -176,7 +193,16 @@ function syscalls.exit(process, thread, code)
 end
 
 function syscalls.waitpid(process, thread, pid)
-
+    -- Really basic for now
+    -- TODO: make this do more
+    if not processes[pid] then return nil
+    elseif not processes[pid].isDead then return kSyscallYield, "waitpid", pid
+    else
+        local retval = processes[pid].threads[0].return_value
+        reap_process(processes[pid])
+        processes[pid] = nil
+        return retval
+    end
 end
 
 function syscalls.getpinfo(process, thread, pid)

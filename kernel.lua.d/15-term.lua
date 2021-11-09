@@ -17,7 +17,9 @@ local function makeTTY(width, height)
         size = {width = width, height = height},
         dirtyLines = {},
         palette = {},
-        dirtyPalette = {}
+        dirtyPalette = {},
+        buffer = "",
+        preBuffer = "",
     }
     for y = 1, height do
         retval[y] = {(' '):rep(width), ('0'):rep(width), ('f'):rep(width)}
@@ -47,7 +49,7 @@ currentTTY = TTY[1]
 
 do
     local n = args.console:match "^tty(%d+)$"
-    if n then KERNEL.stdout, KERNEL.stderr = TTY[tonumber(n)], TTY[tonumber(n)] end
+    if n then KERNEL.stdout, KERNEL.stderr, KERNEL.stdin = TTY[tonumber(n)], TTY[tonumber(n)], TTY[tonumber(n)] end
 end
 
 eventHooks.term_resize = eventHooks.term_resize or {}
@@ -86,8 +88,13 @@ end
 local function nextline(tty)
     tty.cursor.y = tty.cursor.y + 1
     if tty.cursor.y > tty.size.height then
-        table.remove(tty, 1)
+        --table.remove(tty, 1)
+        for i = 1, tty.size.height - 1 do
+            tty[i] = tty[i+1]
+            tty.dirtyLines[i] = true
+        end
         tty[tty.size.height] = {(' '):rep(tty.size.width), tty.colors.fg:rep(tty.size.width), tty.colors.bg:rep(tty.size.width)}
+        tty.dirtyLines[tty.size.height] = true
         tty.cursor.y = tty.size.height
     end
 end
@@ -290,12 +297,12 @@ function terminal.write(tty, text)
             return
         end
         while tty.cursor.x + size > tty.size.width do
-            tty[tty.cursor.y][1] = tty[tty.cursor.y][1]:sub(1, tty.cursor.x - 1) .. text:sub(start, start + tty.size.width - tty.cursor.x - 1)
-            tty[tty.cursor.y][2] = tty[tty.cursor.y][2]:sub(1, tty.cursor.x - 1) .. tty.colors.fg:rep(tty.size.width - tty.cursor.x)
-            tty[tty.cursor.y][3] = tty[tty.cursor.y][3]:sub(1, tty.cursor.x - 1) .. tty.colors.bg:rep(tty.size.width - tty.cursor.x)
+            tty[tty.cursor.y][1] = tty[tty.cursor.y][1]:sub(1, tty.cursor.x - 1) .. text:sub(start, start + tty.size.width - tty.cursor.x)
+            tty[tty.cursor.y][2] = tty[tty.cursor.y][2]:sub(1, tty.cursor.x - 1) .. tty.colors.fg:rep(tty.size.width - tty.cursor.x + 1)
+            tty[tty.cursor.y][3] = tty[tty.cursor.y][3]:sub(1, tty.cursor.x - 1) .. tty.colors.bg:rep(tty.size.width - tty.cursor.x + 1)
             tty.dirtyLines[tty.cursor.y] = true
-            start = start + tty.size.width - tty.cursor.x
-            size = size - (tty.size.width - tty.cursor.x)
+            start = start + tty.size.width - tty.cursor.x + 1
+            size = size - (tty.size.width - tty.cursor.x + 1)
             tty.cursor.x = 1
             nextline(tty)
         end
@@ -316,7 +323,7 @@ function terminal.write(tty, text)
             elseif c == '\b' then
                 commit(n)
                 if tty.cursor.x == 1 then
-                    if tty.cursor.y > 1 then tty.cursor.x, tty.cursor.y = tty.size.width, tty.cursor.y - 1 end
+                    if tty.cursor.y > 1 then tty.cursor.x, tty.currso.y = tty.size.width, tty.cursor.y - 1 end
                 else tty.cursor.x = tty.cursor.x - 1 end
             elseif c == '\t' then
                 commit(n)
@@ -458,11 +465,30 @@ function syscalls.writeerr(process, thread, ...)
 end
 
 function syscalls.read(process, thread, n)
-
+    if process.stdin then
+        while #process.stdin.buffer < n do
+            if process.stdin.isTTY and not process.stdin.flags.delay then return nil end
+            if process.stdin.read then process.stdin.buffer = process.stdin.buffer .. process.stdin:read(n)
+            else return kSyscallYield, "read", n end
+        end
+        local s = process.stdin.buffer:sub(1, n - 1)
+        process.stdin.buffer = process.stdin.buffer:sub(n)
+        return s
+    else return nil end
 end
 
 function syscalls.readline(process, thread)
-
+    if process.stdin then
+        while not process.stdin.buffer:find("\n") do
+            if process.stdin.isTTY and not process.stdin.flags.delay then return nil end
+            if process.stdin.read then process.stdin.buffer = process.stdin.buffer .. process.stdin:read()
+            else return kSyscallYield, "readline" end
+        end
+        local n = process.stdin.buffer:find("\n")
+        local s = process.stdin.buffer:sub(1, n - 1)
+        process.stdin.buffer = process.stdin.buffer:sub(n + 1)
+        return s
+    else return nil end
 end
 
 function syscalls.termctl(process, thread, flags)

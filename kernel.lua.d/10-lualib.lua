@@ -1,3 +1,4 @@
+local do_syscall = do_syscall
 G = {}
 for _,v in ipairs{"assert", "error", "getfenv", "getmetatable", "ipairs", "next",
     "pairs", "pcall", "rawequal", "rawget", "rawset", "select", "setfenv",
@@ -77,7 +78,9 @@ function G.loadfile(path, mode, env)
 end
 
 function G.print(...)
-
+    local args = table.pack(...)
+    args[args.n+1] = "\n"
+    return do_syscall("write", table.unpack(args, 1, args.n + 1))
 end
 
 G.coroutine = {}
@@ -178,6 +181,7 @@ local io_infile = {
     end,
     read = function(self, fmt, ...)
         local v
+        if fmt == nil then fmt = "l" end
         if type(fmt) == "number" then v = self._file.read(fmt)
         elseif type(fmt) == "string" then
             fmt = fmt:gsub("^%*", "")
@@ -254,8 +258,8 @@ G.io = {
         if type(mode) ~= "string" then error("bad argument #2 (expected string, got " .. type(mode) .. ")", 2) end
         local file, err = do_syscall("open", filename, mode)
         if not file then return nil, err
-        elseif mode:find("r") then return setmetatable({_file = file}, {__index = io_outfile, __name = "FILE*"})
-        else return setmetatable({_file = file}, {__index = io_infile, __name = "FILE*"}) end
+        elseif mode:find("r") then return setmetatable({_file = file}, {__index = io_infile, __name = "FILE*"})
+        else return setmetatable({_file = file}, {__index = io_outfile, __name = "FILE*"}) end
     end,
     output = function(file)
         if file == nil then return io_output
