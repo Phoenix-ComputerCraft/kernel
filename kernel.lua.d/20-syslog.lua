@@ -170,6 +170,8 @@ function syscalls.syslog(process, thread, options, ...)
     end
 end
 
+-- TODO: make a final decision on whether non-root users can create logs
+
 function syscalls.mklog(process, thread, name, streamed, path)
     if process.user ~= "root" then error("Permission denied", 0) end
     expect(1, name, "string")
@@ -247,10 +249,10 @@ end
 function syscalls.logtty(process, thread, name, tty, level)
     if process.user ~= "root" then error("Permission denied", 0) end
     expect(1, name, "string")
-    expect(2, tty, "table", "nil")
+    expect(2, tty, "table", "number", "nil")
     expect(3, level, "number", "nil")
     if not syslogs[name] then error("Log does not exist", 0) end
-    syslogs[name].tty = tty
+    syslogs[name].tty = type(tty) == "table" and tty or TTY[tty]
     syslogs[name].tty_level = level
     return true
 end
@@ -266,7 +268,6 @@ end
 local oldpanic = panic
 -- This function can be called either standalone or from within xpcall.
 function panic(message)
-    -- TODO: Write the syslog-related version
     syslog.log({level = 5, category = "Panic"}, "Kernel panic:", message)
     if debug then
         local traceback = debug.traceback(nil, 2)

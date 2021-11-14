@@ -4,6 +4,14 @@ do
     expect = (loadstring or load)(file.readAll(), "@/rom/modules/main/cc/expect.lua")()
     file.close()
     setmetatable(expect, {__call = function(self, ...) return self.expect(...) end})
+    if not expect.range then function expect.range(num, min, max)
+        expect(1, num, "number")
+        expect(2, min, "number", "nil")
+        expect(3, max, "number", "nil")
+        if max < min then error("bad argument #3 (min must be less than or equal to max)", 2) end
+        if num ~= num or num < (min or -math.huge) or num > (max or math.huge) then error(("number outside of range (expected %s to be within %s and %s)"):format(num, min or -math.huge, max or math.huge), 3) end
+        return num
+    end end
 end
 
 -- textutils.[un]serialize is also very useful, so we load that in (but not anything else)
@@ -199,6 +207,85 @@ function split(str, sep)
     local t = {}
     for match in str:gmatch("[^" .. (sep or "%s") .. "]+") do t[#t+1] = match end
     return t
+end
+
+local empty_packed_table = {n = 0}
+function executeThread(process, thread, ev, dead, allWaiting)
+    local args
+    if thread.status == "starting" then args = thread.args
+    elseif thread.status == "syscall" then args = thread.syscall_return
+    elseif thread.status == "preempt" then args = empty_packed_table
+    elseif thread.status == "suspended" then args = ev end
+    if thread.status ~= "dead" and (not thread.filter or thread.filter(process, thread, ev)) then
+        local old_dead = dead
+        dead = false
+        thread.filter = nil
+        local params
+        if thread.yielding then
+            --syslog.debug("Resuming yielded syscall")
+            params = {n = thread.syscall_return.n, true, "syscall", thread.yielding, table.unpack(thread.syscall_return, 4, thread.syscall_return.n)}
+            thread.yielding = nil
+        else
+            --syslog.debug("Resuming thread", tid)
+            local start = os.epoch "utc"
+            params = table.pack(coroutine.resume(thread.coro, table.unpack(args, 1, args.n)))
+            --syslog.debug("Yield", params.n, table.unpack(params, 1, params.n))
+            process.cputime = process.cputime + (os.epoch "utc" - start) / 1000
+        end
+        if params[2] == "syscall" then
+            --syslog.debug("Calling syscall", params[3])
+            thread.status = "syscall"
+            local oldAllWaiting = allWaiting
+            allWaiting = false
+            if params[3] and syscalls[params[3]] then
+                thread.syscall_return = table.pack(pcall(syscalls[params[3]], process, thread, table.unpack(params, 4, params.n)))
+                if not thread.syscall_return[1] and type(thread.syscall_return[2]) == "string" then
+                    syslog.log({level = 0, category = "Syscall Failure", process = 0}, thread.syscall_return[2])
+                    thread.syscall_return[2] = thread.syscall_return[2]:gsub("kernel:%d+: ", "")
+                end
+                if thread.syscall_return[2] == kSyscallYield then
+                    thread.yielding = thread.syscall_return[3]
+                    allWaiting = oldAllWaiting
+                end
+            else thread.syscall_return = {false, "No such syscall", n = 2} end
+        elseif params[2] == "preempt" then
+            thread.status = "preempt"
+            allWaiting = false
+        elseif coroutine.status(thread.coro) == "dead" then
+            thread.status = "dead"
+            thread.return_value = params[2]
+            if not params[1] then
+                thread.did_error = true
+                syslog.log({level = 0, process = process.id, thread = thread.id, category = "Application Error"}, debug.traceback(thread.coro, params[2]))
+                if params[2] and process.stderr and process.stderr.isTTY then terminal.write(process.stderr, params[2] .. "\n") end
+            end
+            -- TODO: handle reaping?
+            dead = old_dead
+        else
+            --syslog.debug("Standard yield", params.n, table.unpack(params, 1, params.n))
+            --syslog.debug(debug.traceback(thread.coro))
+            thread.status = "suspended"
+        end
+    end
+    return dead, allWaiting
+end
+
+function userModeCallback(process, func, ...)
+    local thread = {
+        id = -1,
+        name = "<user mode callback>",
+        coro = coroutine.create(func),
+        status = "starting",
+        args = table.pack(...),
+        filter = nil,
+    }
+    setfenv(func, process.env)
+    local dead = false
+    while not dead do
+        dead = executeThread(process, thread, empty_packed_table, true, false)
+        if thread.status == "suspended" then return false, "attempt to yield from a user mode callback" end
+    end
+    return not thread.did_error, thread.return_value
 end
 
 for _,v in ipairs({...}) do

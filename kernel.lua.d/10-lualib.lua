@@ -88,6 +88,7 @@ for k,v in pairs(coroutine) do G.coroutine[k] = v end
 G.string = string
 G.table = table
 G.math = math
+G.bit32 = bit32
 
 local oldcreate = coroutine.create
 function G.coroutine.create(func)
@@ -356,5 +357,8 @@ if debug then debug.setmetatable(coroutine.running(), {__index = G.coroutine, __
 -- Protect all global functions from debug
 for _,v in pairs(G) do
     if type(v) == "function" then debug.protect(v)
-    elseif type(v) == "table" then for _,w in pairs(v) do if type(w) == "function" then debug.protect(w) end end end
+    elseif type(v) == "table" then
+        for _,w in pairs(v) do if type(w) == "function" then debug.protect(w) end end
+        setmetatable(v, {__newindex = function() end, __metatable = {}})
+    end
 end

@@ -20,6 +20,10 @@ local function makeTTY(width, height)
         dirtyPalette = {},
         buffer = "",
         preBuffer = "",
+        isLocked = false,
+        isGraphics = false,
+        textBuffer = {},
+        graphicsBuffer = {},
     }
     for y = 1, height do
         retval[y] = {(' '):rep(width), ('0'):rep(width), ('f'):rep(width)}
@@ -46,6 +50,7 @@ do
     }
 end
 currentTTY = TTY[1]
+local userTTYs = {}
 
 do
     local n = args.console:match "^tty(%d+)$"
@@ -60,29 +65,59 @@ end
 
 function terminal.redraw(tty, full)
     if currentTTY ~= tty then return end
+    local buffer = tty
+    if tty.isLocked then
+        if tty.isGraphics then
+            term.setGraphicsMode(2)
+            if term.setFrozen then term.setFrozen(true) end
+            if full then
+                term.clear()
+                term.drawPixels(0, 0, tty.graphicsBuffer)
+                for i = 0, 255 do term.setPaletteColor(i, tty.graphicsBuffer.palette[i][1], tty.graphicsBuffer.palette[i][2], tty.graphicsBuffer.palette[i][3]) end
+            else
+                if tty.graphicsBuffer.frozen then
+                    if term.setFrozen then term.setFrozen(false) end
+                    return
+                end
+                for _, v in ipairs(tty.graphicsBuffer.dirtyRects) do
+                    if v.color then term.setPixel(v.x, v.y, v.color, v.width, v.height)
+                    else term.drawPixels(v.x, v.y, v) end
+                end
+                for i in pairs(tty.graphicsBuffer.dirtyPalette) do term.setPaletteColor(i, tty.graphicsBuffer.palette[i][1], tty.graphicsBuffer.palette[i][2],tty.graphicsBuffer.palette[i][3]) end
+            end
+            if term.setFrozen then term.setFrozen(false) end
+            buffer.dirtyRects, buffer.dirtyPalette = {}, {}
+            return
+        end
+        if term.setGraphicsMode then term.setGraphicsMode(false) end
+        buffer = tty.textBuffer
+    elseif tty.isGraphics then
+        term.setGraphicsMode(false)
+        tty.isGraphics = false
+    end
     term.setCursorBlink(false)
     if full then
         term.clear()
         for y = 1, tty.size.height do
             term.setCursorPos(1, y)
-            term.blit(tty[y][1], tty[y][2], tty[y][3])
+            term.blit(buffer[y][1], buffer[y][2], buffer[y][3])
         end
-        for i = 0, 15 do term.setPaletteColor(2^i, tty.palette[i][1], tty.palette[i][2], tty.palette[i][3]) end
+        for i = 0, 15 do term.setPaletteColor(2^i, buffer.palette[i][1], buffer.palette[i][2], buffer.palette[i][3]) end
     else
-        for y in pairs(tty.dirtyLines) do
-            if not tty[y] then error(debug.traceback(y)) end
+        for y in pairs(buffer.dirtyLines) do
+            if not buffer[y] then error(debug.traceback(y)) end
             term.setCursorPos(1, y)
-            if #tty[y][1] ~= #tty[y][2] or #tty[y][2] ~= #tty[y][3] then
-                syslog.log({level = 5}, "Bug in text writer! Inequal lengths: " .. #tty[y][1] .. ", " .. #tty[y][2] .. ", " .. #tty[y][3])
+            if #buffer[y][1] ~= #buffer[y][2] or #buffer[y][2] ~= #buffer[y][3] then
+                syslog.log({level = 5}, "Bug in text writer! Inequal lengths: " .. #buffer[y][1] .. ", " .. #buffer[y][2] .. ", " .. #buffer[y][3])
                 error("Invalid lengths")
             end
-            term.blit(tty[y][1], tty[y][2], tty[y][3])
+            term.blit(buffer[y][1], buffer[y][2], buffer[y][3])
         end
-        for i in pairs(tty.dirtyPalette) do term.setPaletteColor(2^i, tty.palette[i][1], tty.palette[i][2], tty.palette[i][3]) end
+        for i in pairs(buffer.dirtyPalette) do term.setPaletteColor(2^i, buffer.palette[i][1], buffer.palette[i][2], buffer.palette[i][3]) end
     end
-    term.setCursorPos(tty.cursor.x, tty.cursor.y)
-    term.setCursorBlink(tty.cursorBlink)
-    tty.dirtyLines, tty.dirtyPalette = {}, {}
+    term.setCursorPos(buffer.cursor.x, buffer.cursor.y)
+    term.setCursorBlink(buffer.cursorBlink)
+    buffer.dirtyLines, buffer.dirtyPalette = {}, {}
 end
 
 local function nextline(tty)
@@ -442,7 +477,7 @@ function syscalls.write(process, thread, ...)
     if not process.stdout then return end
     local function write(t)
         if process.stdout.isTTY then terminal.write(process.stdout, t)
-        else end
+        else process.stdout.write(t) end
     end
     for i, v in ipairs{...} do
         if i > 1 then write("\t") end
@@ -455,7 +490,7 @@ function syscalls.writeerr(process, thread, ...)
     if not process.stderr then return end
     local function write(t)
         if process.stderr.isTTY then terminal.write(process.stderr, t)
-        else end
+        else process.stderr.write(t) end
     end
     for i, v in ipairs{...} do
         if i > 1 then write("\t") end
@@ -468,7 +503,7 @@ function syscalls.read(process, thread, n)
     if process.stdin then
         while #process.stdin.buffer < n do
             if process.stdin.isTTY and not process.stdin.flags.delay then return nil end
-            if process.stdin.read then process.stdin.buffer = process.stdin.buffer .. process.stdin:read(n)
+            if process.stdin.read then process.stdin.buffer = process.stdin.buffer .. process.stdin.read(n)
             else return kSyscallYield, "read", n end
         end
         local s = process.stdin.buffer:sub(1, n - 1)
@@ -481,7 +516,7 @@ function syscalls.readline(process, thread)
     if process.stdin then
         while not process.stdin.buffer:find("\n") do
             if process.stdin.isTTY and not process.stdin.flags.delay then return nil end
-            if process.stdin.read then process.stdin.buffer = process.stdin.buffer .. process.stdin:read()
+            if process.stdin.read then process.stdin.buffer = process.stdin.buffer .. process.stdin.read()
             else return kSyscallYield, "readline" end
         end
         local n = process.stdin.buffer:find("\n")
@@ -492,17 +527,481 @@ function syscalls.readline(process, thread)
 end
 
 function syscalls.termctl(process, thread, flags)
-
+    expect(1, flags, "table", "nil")
+    if not process.stdout or not process.stdout.isTTY then return nil end
+    if flags then
+        expect.field(flags, "cbreak", "boolean", "nil")
+        expect.field(flags, "delay", "boolean", "nil")
+        expect.field(flags, "echo", "boolean", "nil")
+        expect.field(flags, "keypad", "boolean", "nil")
+        expect.field(flags, "nlcr", "boolean", "nil")
+        expect.field(flags, "raw", "boolean", "nil")
+        for k, v in pairs(flags) do if process.stdout.flags[k] then process.stdout.flags[k] = v end end
+    end
+    local t = deepcopy(process.stdout.flags)
+    t.hasgfx = term.getGraphicsMode ~= nil
+    return t
 end
 
 function syscalls.openterm(process, thread)
+    if not process.stdout or not process.stdout.isTTY then return nil, "No valid TTY attached" end
+    if process.stdout.isLocked then return nil, "Terminal already in use" end
+    local size = process.stdout.size
+    local buffer = {
+        cursor = {x = 1, y = 1},
+        cursorBlink = false,
+        colors = {fg = '0', bg = 'f'},
+        palette = {},
+        dirtyLines = {},
+        dirtyPalette = {},
+    }
+    process.stdout.textBuffer = buffer
+    process.stdout.isLocked = true
+    process.stdout.isGraphics = false
+    for y = 1, size.height do
+        buffer[y] = {(' '):rep(size.width), ('0'):rep(size.width), ('f'):rep(size.width)}
+        buffer.dirtyLines[y] = true
+    end
+    for i = 0, 15 do
+        buffer.palette[i] = {term.nativePaletteColor(2^i)}
+        buffer.dirtyPalette[i] = true
+    end
 
+    local win = {}
+    local redraw = terminal.redraw
+    local expect = expect
+
+    function win.close()
+        if not win then error("terminal is already closed", 2) end
+        win = nil
+        process.stdout.isLocked = false
+        redraw(process.stdout, true)
+    end
+
+    function win.write(text)
+        if not win then error("terminal is already closed", 2) end
+        text = tostring(text)
+        expect(1, text, "string")
+        if buffer.cursor.y < 1 or buffer.cursor.y > size.height then return
+        elseif buffer.cursor.x > size.width or buffer.cursor.x + #text < 1 then
+            buffer.cursor.x = buffer.cursor.x + #text
+            return
+        elseif buffer.cursor.x < 1 then
+            text = text:sub(-buffer.cursor.x + 2)
+            buffer.cursor.x = 1
+        end
+        local ntext = #text
+        if buffer.cursor.x + #text > size.width then text = text:sub(1, size.width - buffer.cursor.x + 1) end
+        buffer[buffer.cursor.y][1] = buffer[buffer.cursor.y][1]:sub(1, buffer.cursor.x - 1) .. text .. buffer[buffer.cursor.y][1]:sub(buffer.cursor.x + #text)
+        buffer[buffer.cursor.y][2] = buffer[buffer.cursor.y][2]:sub(1, buffer.cursor.x - 1) .. buffer.colors.fg:rep(#text) .. buffer[buffer.cursor.y][2]:sub(buffer.cursor.x + #text)
+        buffer[buffer.cursor.y][3] = buffer[buffer.cursor.y][3]:sub(1, buffer.cursor.x - 1) .. buffer.colors.bg:rep(#text) .. buffer[buffer.cursor.y][3]:sub(buffer.cursor.x + #text)
+        buffer.cursor.x = buffer.cursor.x + ntext
+        buffer.dirtyLines[buffer.cursor.y] = true
+        --redraw(process.stdout)
+    end
+
+    function win.blit(text, fg, bg)
+        if not win then error("terminal is already closed", 2) end
+        text = tostring(text)
+        expect(1, text, "string")
+        expect(2, fg, "string")
+        expect(3, bg, "string")
+        if #text ~= #fg or #fg ~= #bg then error("Arguments must be the same length", 2) end
+        if buffer.cursor.y < 1 or buffer.cursor.y > size.height then return
+        elseif buffer.cursor.x > size.width or buffer.cursor.x < 1 - #text then
+            buffer.cursor.x = buffer.cursor.x + #text
+            redraw(process.stdout)
+            return
+        elseif buffer.cursor.x < 1 then
+            text, fg, bg = text:sub(-buffer.cursor.x + 2), fg:sub(-buffer.cursor.x + 2), bg:sub(-buffer.cursor.x + 2)
+            buffer.cursor.x = 1
+        end
+        local ntext = #text
+        if buffer.cursor.x + #text > size.width then text, fg, bg = text:sub(1, size.width - buffer.cursor.x + 1), fg:sub(1, size.width - buffer.cursor.x + 1), bg:sub(1, size.width - buffer.cursor.x + 1) end
+        buffer[buffer.cursor.y][1] = buffer[buffer.cursor.y][1]:sub(1, buffer.cursor.x - 1) .. text .. buffer[buffer.cursor.y][1]:sub(buffer.cursor.x + #text)
+        buffer[buffer.cursor.y][2] = buffer[buffer.cursor.y][2]:sub(1, buffer.cursor.x - 1) .. fg .. buffer[buffer.cursor.y][2]:sub(buffer.cursor.x + #fg)
+        buffer[buffer.cursor.y][3] = buffer[buffer.cursor.y][3]:sub(1, buffer.cursor.x - 1) .. bg .. buffer[buffer.cursor.y][3]:sub(buffer.cursor.x + #bg)
+        buffer.cursor.x = buffer.cursor.x + ntext
+        buffer.dirtyLines[buffer.cursor.y] = true
+        --redraw(process.stdout)
+    end
+
+    function win.clear()
+        if not win then error("terminal is already closed", 2) end
+        for y = 1, size.height do
+            buffer[y] = {(' '):rep(size.width), buffer.colors.fg:rep(size.width), buffer.colors.bg:rep(size.width)}
+            buffer.dirtyLines[y] = true
+        end
+        --redraw(process.stdout)
+    end
+
+    function win.clearLine()
+        if not win then error("terminal is already closed", 2) end
+        if buffer.cursor.y >= 1 and buffer.cursor.y <= size.height then
+            buffer[buffer.cursor.y] = {(' '):rep(size.width), buffer.colors.fg:rep(size.width), buffer.colors.bg:rep(size.width)}
+            buffer.dirtyLines[buffer.cursor.y] = true
+            --redraw(process.stdout)
+        end
+    end
+
+    function win.getCursorPos()
+        if not win then error("terminal is already closed", 2) end
+        return buffer.cursor.x, buffer.cursor.y
+    end
+
+    function win.setCursorPos(cx, cy)
+        if not win then error("terminal is already closed", 2) end
+        expect(1, cx, "number")
+        expect(2, cy, "number")
+        if cx == buffer.cursor.x and cy == buffer.cursor.y then return end
+        buffer.cursor.x, buffer.cursor.y = cx, cy
+        --redraw(process.stdout)
+    end
+
+    function win.getCursorBlink()
+        if not win then error("terminal is already closed", 2) end
+        return buffer.cursorBlink
+    end
+
+    function win.setCursorBlink(b)
+        if not win then error("terminal is already closed", 2) end
+        expect(1, b, "boolean")
+        buffer.cursorBlink = b
+        --redraw(process.stdout)
+    end
+
+    function win.isColor()
+        if not win then error("terminal is already closed", 2) end
+        return true
+    end
+
+    function win.getSize()
+        if not win then error("terminal is already closed", 2) end
+        return size.width, size.height
+    end
+
+    function win.scroll(lines)
+        if not win then error("terminal is already closed", 2) end
+        expect(1, lines, "number")
+        if math.abs(lines) >= size.width then
+            for y = 1, size.height do buffer[y] = {(' '):rep(size.width), buffer.colors.fg:rep(size.width), buffer.colors.bg:rep(size.width)} end
+        elseif lines > 0 then
+            for i = lines + 1, size.height do buffer[i - lines] = buffer[i] end
+            for i = size.height - lines + 1, size.height do buffer[i] = {(' '):rep(size.width), buffer.colors.fg:rep(size.width), buffer.colors.bg:rep(size.width)} end
+        elseif lines < 0 then
+            for i = 1, size.height + lines do buffer[i - lines] = buffer[i] end
+            for i = 1, -lines do buffer[i] = {(' '):rep(size.width), buffer.colors.fg:rep(size.width), buffer.colors.bg:rep(size.width)} end
+        else return end
+        for i = 1, size.height do buffer.dirtyLines[i] = true end
+        --redraw(process.stdout)
+    end
+
+    function win.getTextColor()
+        if not win then error("terminal is already closed", 2) end
+        return 2^tonumber(buffer.colors.fg)
+    end
+
+    function win.setTextColor(color)
+        if not win then error("terminal is already closed", 2) end
+        expect(1, color, "number")
+        buffer.colors.fg = ("%x"):format(math.floor(math.log(color, 2)) % 16)
+    end
+
+    function win.getBackgroundColor()
+        if not win then error("terminal is already closed", 2) end
+        return 2^tonumber(buffer.colors.bg)
+    end
+
+    function win.setBackgroundColor(color)
+        if not win then error("terminal is already closed", 2) end
+        expect(1, color, "number")
+        buffer.colors.bg = ("%x"):format(math.floor(math.log(color, 2)) % 16)
+    end
+
+    function win.getPaletteColor(color)
+        if not win then error("terminal is already closed", 2) end
+        expect(1, color, "number")
+        color = bit32.band(math.floor(math.log(color, 2)), 0x0F) % 16
+        return table.unpack(buffer.palette[color])
+    end
+
+    function win.setPaletteColor(color, r, g, b)
+        if not win then error("terminal is already closed", 2) end
+        expect(1, color, "number")
+        expect(2, r, "number")
+        if g == nil and b == nil then r, g, b = bit32.band(bit32.rshift(r, 16), 0xFF) / 255, bit32.band(bit32.rshift(r, 8), 0xFF) / 255, bit32.band(r, 0xFF) / 255 end
+        expect(3, g, "number")
+        expect(4, b, "number")
+        if r < 0 or r > 1 then error("bad argument #2 (value out of range)", 2) end
+        if g < 0 or g > 1 then error("bad argument #3 (value out of range)", 2) end
+        if b < 0 or b > 1 then error("bad argument #4 (value out of range)", 2) end
+        color = bit32.band(math.floor(math.log(color, 2)), 0x0F) % 16
+        buffer.palette[color] = {r, g, b}
+        buffer.dirtyPalette[color] = true
+        --redraw(process.stdout)
+    end
+
+    for _, v in pairs(win) do setfenv(v, process.env) debug.protect(v) end
+    win.isColour = win.isColor
+    win.getTextColour = win.getTextColor
+    win.setTextColour = win.setTextColor
+    win.getBackgroundColour = win.getBackgroundColor
+    win.setBackgroundColour = win.setBackgroundColor
+    win.getPaletteColour = win.getPaletteColor
+    win.setPaletteColour = win.setPaletteColor
+    process.dependents[#process.dependents+1] = {gc = function() if win then return win.close() end end}
+    redraw(process.stdout, true)
+    return win
 end
 
 function syscalls.opengfx(process, thread)
+    if not term.drawPixels then return nil, "Graphics mode not supported" end
+    if not process.stdout or not process.stdout.isTTY then return nil, "No valid TTY attached" end
+    if process.stdout.isLocked then return nil, "Terminal already in use" end
+    local size = process.stdout.size
+    local buffer = {
+        palette = {},
+        dirtyRects = {},
+        dirtyPalette = {},
+        frozen = false,
+    }
+    process.stdout.graphicsBuffer = buffer
+    process.stdout.isLocked = true
+    process.stdout.isGraphics = true
+    for y = 1, size.height * 9 do buffer[y] = ('\15'):rep(size.width * 6) end
+    for i = 0, 15 do
+        buffer.palette[i] = {term.nativePaletteColor(2^i)}
+        buffer.dirtyPalette[i] = true
+    end
+    for i = 16, 255 do
+        buffer.palette[i] = {0, 0, 0}
+        buffer.dirtyPalette[i] = true
+    end
 
+    local win = {}
+    local redraw = terminal.redraw
+    local expect = expect
+
+    function win.close()
+        if not win then error("terminal is already closed", 2) end
+        win = nil
+        process.stdout.isLocked = false
+        redraw(process.stdout, true)
+    end
+
+    function win.getSize()
+        return size.width * 6, size.height * 9
+    end
+
+    function win.clear()
+        if not win then error("terminal is already closed", 2) end
+        for y = 1, size.height * 9 do buffer[y] = ('\15'):rep(size.width * 6) end
+        redraw(process.stdout, true)
+    end
+
+    function win.getPixel(x, y)
+        if not win then error("terminal is already closed", 2) end
+        expect(1, x, "number")
+        expect(2, y, "number")
+        expect.range(x, 0, size.width * 6 - 1)
+        expect.range(y, 0, size.height * 9 - 1)
+        return buffer[y+1]:byte(x+1)
+    end
+
+    function win.setPixel(x, y, color)
+        if not win then error("terminal is already closed", 2) end
+        expect(1, x, "number")
+        expect(2, y, "number")
+        expect(3, color, "number")
+        expect.range(x, 0, size.width * 6 - 1)
+        expect.range(y, 0, size.height * 9 - 1)
+        expect.range(color, 0, 255)
+        buffer[y+1] = buffer[y+1]:sub(1, x) .. string.char(color) .. buffer[y+1]:sub(x + 2)
+        buffer.dirtyRects[#buffer.dirtyRects+1] = {x = x, y = y, color = color}
+        --if not buffer.frozen then redraw(process.stdout) end
+    end
+
+    function win.getPixels(x, y, width, height, asStr)
+        if not win then error("terminal is already closed", 2) end
+        expect(1, x, "number")
+        expect(2, y, "number")
+        expect(3, width, "number")
+        expect(4, height, "number")
+        expect(5, asStr, "boolean", "nil")
+        expect.range(width, 0)
+        expect.range(height, 0)
+        local t = {}
+        for py = 1, height do
+            if asStr then t[py] = buffer[y+py]:sub(x + 1, x + width)
+            else t[py] = {buffer[y+py]:sub(x + 1, x + width):byte(1, -1)} end
+        end
+        return t
+    end
+
+    function win.drawPixels(x, y, data, width, height)
+        if not win then error("terminal is already closed", 2) end
+        expect(1, x, "number")
+        expect(2, y, "number")
+        expect(3, data, "table", "number")
+        local isn = type(data) == "number"
+        expect(4, width, "number", not isn and "nil" or nil)
+        expect(5, height, "number", not isn and "nil" or nil)
+        expect.range(x, 0, size.width * 6 - 1)
+        expect.range(y, 0, size.height * 9 - 1)
+        if width then expect.range(width, 0) end
+        if height then expect.range(height, 0) end
+        if isn then expect.range(data, 0, 255) end
+        if width == 0 or height == 0 then return end
+        if width and x + width >= size.width * 6 then width = size.width * 6 - x end
+        height = height or #data
+        local rect = {x = x, y = y, width = width, height = height}
+        for py = 1, height do
+            if y + py > size.height * 9 then break end
+            if isn then
+                local s = string.char(data):rep(width)
+                buffer[y+py] = buffer[y+py]:sub(1, x) .. s .. buffer[y+py]:sub(x + width + 1)
+                rect[py] = s
+            elseif data[py] ~= nil then
+                if type(data[py]) ~= "table" and type(data[py]) ~= "string" then
+                    error("bad argument #3 to 'drawPixels' (invalid row " .. py .. ")", 2)
+                end
+                local width = width or #data[py]
+                if x + width >= size.width * 6 then width = size.width * 6 - x end
+                local s
+                if type(data[py]) == "string" then
+                    s = data[py]
+                    if #s < width then s = s .. ('\15'):rep(width - #s)
+                    elseif #s > width then s = s:sub(1, width) end
+                else
+                    s = ""
+                    for px = 1, width do s = s .. string.char(data[py][px] or buffer[y+py]:byte(x+px)) end
+                end
+                buffer[y+py] = buffer[y+py]:sub(1, x) .. s .. buffer[y+py]:sub(x + width + 1)
+                rect[py] = s
+            end
+        end
+        buffer.dirtyRects[#buffer.dirtyRects+1] = rect
+        --if not buffer.frozen then redraw(process.stdout) end
+    end
+
+    function win.getFrozen()
+        if not win then error("terminal is already closed", 2) end
+        return buffer.frozen
+    end
+
+    function win.setFrozen(f)
+        if not win then error("terminal is already closed", 2) end
+        expect(1, f, "boolean")
+        buffer.frozen = f
+        --if not buffer.frozen then redraw(process.stdout) end
+    end
+
+    function win.getPaletteColor(color)
+        if not win then error("terminal is already closed", 2) end
+        expect(1, color, "number")
+        expect.range(color, 0, 255)
+        return table.unpack(buffer.palette[color])
+    end
+
+    function win.setPaletteColor(color, r, g, b)
+        if not win then error("terminal is already closed", 2) end
+        expect(1, color, "number")
+        expect(2, r, "number")
+        if g == nil and b == nil then r, g, b = bit32.band(bit32.rshift(r, 16), 0xFF) / 255, bit32.band(bit32.rshift(r, 8), 0xFF) / 255, bit32.band(r, 0xFF) / 255 end
+        expect(3, g, "number")
+        expect(4, b, "number")
+        expect.range(r, 0, 1)
+        expect.range(g, 0, 1)
+        expect.range(b, 0, 1)
+        expect.range(color, 0, 255)
+        buffer.palette[color] = {r, g, b}
+        buffer.dirtyPalette[color] = true
+        --if not buffer.frozen then redraw(process.stdout) end
+    end
+
+    for _, v in pairs(win) do setfenv(v, process.env) debug.protect(v) end
+    win.getPaletteColour = win.getPaletteColor
+    win.setPaletteColour = win.setPaletteColor
+    process.dependents[#process.dependents+1] = {gc = function() if win then return win.close() end end}
+    redraw(process.stdout, true)
+    return win
 end
 
 function syscalls.mktty(process, thread, width, height)
+    expect(1, width, "number")
+    expect(2, height, "number")
+    expect.range(width, 1)
+    expect.range(height, 1)
+    local tty = makeTTY(width, height)
+    local retval = setmetatable({}, {__index = tty, __metatable = {}})
+    userTTYs[retval] = tty
+    process.dependents[#process.dependents+1] = {gc = function() userTTYs[retval] = nil end}
+    return retval
+end
 
+function syscalls.stdin(process, thread, handle)
+    expect(1, handle, "number", "table", "nil")
+    if type(handle) == "number" then process.stdin = TTY[handle]
+    elseif handle == nil then process.stdin = nil
+    else
+        if handle.isTTY then
+            handle = userTTYs[handle]
+            if not handle then error("bad argument #1 (invalid TTY)", 2) end
+        else
+            expect.field(handle, "read", "function")
+            local read = handle.read
+            handle = {
+                buffer = "",
+                read = function(...)
+                    local ok, res = userModeCallback(process, read, ...)
+                    if ok then return res else error(res, 2) end
+                end
+            }
+        end
+        process.stdin = handle
+    end
+end
+
+function syscalls.stdout(process, thread, handle)
+    expect(1, handle, "number", "table", "nil")
+    if type(handle) == "number" then process.stdout = TTY[handle]
+    elseif handle == nil then process.stdout = nil
+    else
+        if handle.isTTY then
+            handle = userTTYs[handle]
+            if not handle then error("bad argument #1 (invalid TTY)", 2) end
+        else
+            expect.field(handle, "write", "function")
+            local write = handle.write
+            handle = {
+                write = function(...)
+                    local ok, res = userModeCallback(process, write, ...)
+                    if ok then return res else error(res, 2) end
+                end
+            }
+        end
+        process.stdout = handle
+    end
+end
+
+function syscalls.stderr(process, thread, handle)
+    expect(1, handle, "number", "table", "nil")
+    if type(handle) == "number" then process.stderr = TTY[handle]
+    elseif handle == nil then process.stderr = nil
+    else
+        if handle.isTTY then
+            handle = userTTYs[handle]
+            if not handle then error("bad argument #1 (invalid TTY)", 2) end
+        else
+            expect.field(handle, "write", "function")
+            local write = handle.write
+            handle = {
+                write = function(...)
+                    local ok, res = userModeCallback(process, write, ...)
+                    if ok then return res else error(res, 2) end
+                end
+            }
+        end
+        process.stderr = handle
+    end
 end

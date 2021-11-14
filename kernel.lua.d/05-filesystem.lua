@@ -78,39 +78,53 @@ do
 end
 
 function filesystems.craftos:getmeta(user, path)
+    local stack = {}
     local t = self.meta
     for _,p in ipairs(split(path, "/\\")) do
-        if not t then return nil
-        elseif t.meta.type ~= "directory" then error("Not a directory", 2)
-        elseif t.meta.permissions[user] then if not t.meta.permissions[user].execute then error("Permission denied", 2) end
-        elseif not t.meta.worldPermissions.execute then error("Permission denied", 2) end
-        t = t.contents[p]
-        -- TODO: handle link traversal
-        --if t and t.meta.type == "link" then t = ? end
+        if p == ".." then
+            t = table.remove(stack)
+            if not t then return nil end
+        elseif not p:match "^%.*$" then
+            if not t then return nil
+            elseif t.meta.type ~= "directory" then error("Not a directory", 2)
+            elseif t.meta.permissions[user] then if not t.meta.permissions[user].execute then error("Permission denied", 2) end
+            elseif not t.meta.worldPermissions.execute then error("Permission denied", 2) end
+            stack[#stack+1] = t
+            t = t.contents[p]
+            -- TODO: handle link traversal
+            --if t and t.meta.type == "link" then t = ? end
+        end
     end
     return t and t.meta
 end
 
 function filesystems.craftos:setmeta(user, path, meta)
+    local stack = {}
     local t = self.meta
     for _,p in ipairs(split(path, "/\\")) do
-        if t.meta.type ~= "directory" then error("Not a directory", 2)
-        elseif t.meta.permissions[user] then if not t.meta.permissions[user].execute then error("Permission denied", 2) end
-        elseif not t.meta.worldPermissions.execute then error("Permission denied", 2) end
-        if not t.contents[p] then t.contents[p] = { -- Initialize with default directory meta if not present
-            meta = {                                -- This means the directory was created on-disk but the metadata was never set
-                type = "directory",                 -- We'll set it properly at the end (or something)
-                owner = "root",                     -- TODO: maybe set this to the parent's permissions? (Would maybe make more sense)
-                permissions = {
-                    root = {read = true, write = true, execute = true}
+        if p == ".." then
+            t = table.remove(stack)
+            if not t then error("Not a directory", 2) end
+        elseif not p:match "^%.*$" then
+            if t.meta.type ~= "directory" then error("Not a directory", 2)
+            elseif t.meta.permissions[user] then if not t.meta.permissions[user].execute then error("Permission denied", 2) end
+            elseif not t.meta.worldPermissions.execute then error("Permission denied", 2) end
+            if not t.contents[p] then t.contents[p] = { -- Initialize with default directory meta if not present
+                meta = {                                -- This means the directory was created on-disk but the metadata was never set
+                    type = "directory",                 -- We'll set it properly at the end (or something)
+                    owner = "root",                     -- TODO: maybe set this to the parent's permissions? (Would maybe make more sense)
+                    permissions = {
+                        root = {read = true, write = true, execute = true}
+                    },
+                    worldPermissions = {read = true, write = false, execute = true}
                 },
-                worldPermissions = {read = true, write = false, execute = true}
-            },
-            contents = {}
-        } end
-        t = t.contents[p]
-        -- TODO: handle link traversal
-        --if t and t.meta.type == "link" then t = ? end
+                contents = {}
+            } end
+            stack[#stack+1] = t
+            t = t.contents[p]
+            -- TODO: handle link traversal
+            --if t and t.meta.type == "link" then t = ? end
+        end
     end
     t.meta = {
         type = meta.type,
@@ -178,7 +192,9 @@ function filesystems.craftos:list(process, path)
 end
 
 function filesystems.craftos:stat(process, path)
-    local ok, attr = pcall(fs.attributes, fs.combine(self.path, path))
+    local p = fs.combine(self.path, path)
+    if not p:find(self.path:gsub("^/", ""):gsub("/$", ""), 1, false) then return nil end
+    local ok, attr = pcall(fs.attributes, p)
     if not ok or not attr then return nil end
     attr.type = attr.isDir and "directory" or "file"
     attr.special = {}

@@ -4,17 +4,19 @@ G.periphemu = periphemu
 syslogs.default.file = filesystem.open(KERNEL, "/var/log/default.log", "a")
 
 local empty_packed_table = {n = 0}
-local init_ok, init_pid
+local init_process = processes[syscalls.fork(KERNEL, nil, function() end, "init")]
+local init_pid = init_process.id
+local init_ok, init_err
 if args.init then
-    init_ok, init_pid = pcall(syscalls.exec, KERNEL, nil, args.init)
+    init_ok, init_err = pcall(syscalls.exec, init_process, nil, args.init)
 end
 if not init_ok then
-    syslog.log({level = 4, process = 0}, "Could not load init:", init_pid)
+    syslog.log({level = 4, process = 0}, "Could not load init:", init_err)
     syslog.log("Could not find provided init, trying default locations")
     for _,v in ipairs{"/sbin/init", "/etc/init", "/bin/init", "/bin/sh"} do
         syslog.log("Trying", v)
-        init_ok, init_pid = pcall(syscalls.exec, KERNEL, nil, v)
-        if not init_ok then syslog.log({level = 4, process = 0}, "Could not load init:", init_pid) end
+        init_ok, init_err = pcall(syscalls.exec, init_process, nil, v)
+        if not init_ok then syslog.log({level = 4, process = 0}, "Could not load init:", init_err) end
         if init_ok then break end
     end
     if not init_ok then panic("No working init found") end
@@ -138,65 +140,17 @@ while processes[init_pid] do
     for pid, process in pairs(processes) do if pid ~= 0 then
         local dead = true
         for tid, thread in pairs(process.threads) do
-            local args
-            if thread.status == "starting" then args = thread.args
-            elseif thread.status == "syscall" then args = thread.syscall_return
-            elseif thread.status == "preempt" then args = empty_packed_table
-            elseif thread.status == "suspended" then args = ev end
-            if thread.status ~= "dead" and (not thread.filter or thread.filter(process, thread, ev)) then
-                local old_dead = dead
-                dead = false
-                thread.filter = nil
-                local params
-                if thread.yielding then
-                    --syslog.debug("Resuming yielded syscall")
-                    params = {n = thread.syscall_return.n, true, "syscall", thread.yielding, table.unpack(thread.syscall_return, 4, thread.syscall_return.n)}
-                    thread.yielding = nil
-                else
-                    --syslog.debug("Resuming thread", tid)
-                    local start = os.epoch "utc"
-                    params = table.pack(coroutine.resume(thread.coro, table.unpack(args, 1, args.n)))
-                    --syslog.debug("Yield", params.n, table.unpack(params, 1, params.n))
-                    process.cputime = process.cputime + (os.epoch "utc" - start) / 1000
-                end
-                if params[2] == "syscall" then
-                    --syslog.debug("Calling syscall", params[3])
-                    thread.status = "syscall"
-                    local oldAllWaiting = allWaiting
-                    allWaiting = false
-                    if params[3] and syscalls[params[3]] then
-                        thread.syscall_return = table.pack(pcall(syscalls[params[3]], process, thread, table.unpack(params, 4, params.n)))
-                        if not thread.syscall_return[1] and type(thread.syscall_return[2]) == "string" then
-                            syslog.log({level = 0, category = "Syscall Failure", process = 0}, thread.syscall_return[2])
-                            thread.syscall_return[2] = thread.syscall_return[2]:gsub("kernel:%d+: ", "")
-                        end
-                        if thread.syscall_return[2] == kSyscallYield then
-                            thread.yielding = thread.syscall_return[3]
-                            allWaiting = oldAllWaiting
-                        end
-                    else thread.syscall_return = {false, "No such syscall", n = 2} end
-                elseif params[2] == "preempt" then
-                    thread.status = "preempt"
-                    allWaiting = false
-                elseif coroutine.status(thread.coro) == "dead" then
-                    thread.status = "dead"
-                    thread.return_value = params[2]
-                    if not params[1] then syslog.log({level = 4, process = pid, thread = tid, category = "Application Error"}, debug.traceback(thread.coro, params[2])) end
-                    -- TODO: handle reaping?
-                    dead = old_dead
-                else
-                    --syslog.debug("Standard yield", params.n, table.unpack(params, 1, params.n))
-                    --syslog.debug(debug.traceback(thread.coro))
-                    thread.status = "suspended"
-                end
-            end
+            dead, allWaiting = executeThread(process, thread, ev, dead, allWaiting)
         end
         if dead then
             process.isDead = true
+            -- TODO: queue event instead of forcing resume
+            allWaiting = false
         end
         if dead and pid == init_pid then
             init_retval = process.threads[0].return_value
             processes[pid] = nil
         end
     end end
+    terminal.redraw(currentTTY)
 end
