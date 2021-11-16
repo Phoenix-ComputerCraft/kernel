@@ -1,4 +1,5 @@
 local do_syscall = do_syscall
+local expect = expect
 G = {}
 for _,v in ipairs{"assert", "error", "getfenv", "getmetatable", "ipairs", "next",
     "pairs", "pcall", "rawequal", "rawget", "rawset", "select", "setfenv",
@@ -355,10 +356,12 @@ G.debug = debug -- since debug is protected, we can pretty much just stick it in
 if debug then debug.setmetatable(coroutine.running(), {__index = G.coroutine, __call = coroutine.resume}) end
 
 -- Protect all global functions from debug
-for _,v in pairs(G) do
-    if type(v) == "function" then debug.protect(v)
-    elseif type(v) == "table" then
-        for _,w in pairs(v) do if type(w) == "function" then debug.protect(w) end end
+for k,v in pairs(G) do
+    if type(v) == "function" then
+        pcall(setfenv, v, G)
+        debug.protect(v)
+    elseif type(v) == "table" and k ~= "debug" then
+        for _,w in pairs(v) do if type(w) == "function" then pcall(setfenv, w, G) debug.protect(w) end end
         setmetatable(v, {__newindex = function() end, __metatable = {}})
     end
 end

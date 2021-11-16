@@ -27,3 +27,8 @@ function syscalls.reboot(process, thread)
     os.reboot()
     while true do coroutine.yield() end
 end
+
+-- TODO: temporary?
+function syscalls.serialize(process, thread, value)
+    return serialize(value)
+end

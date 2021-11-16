@@ -22,25 +22,13 @@ if not init_ok then
     if not init_ok then panic("No working init found") end
 end
 syslog.log("Starting init from " .. processes[init_pid].name)
-local event_queue = {front = 0, back = 0, [0] = empty_packed_table}
 local allWaiting = false
 
-while processes[init_pid] do
-    if not allWaiting then os.queueEvent("__event_queue_back") end
-    while true do
-        local ev = table.pack(coroutine.yield())
-        if ev[1] == "__event_queue_back" then break end
-        event_queue[event_queue.back+1] = ev
-        event_queue.back = event_queue.back + 1
-        if allWaiting then break end
-    end
-    local ev = event_queue[event_queue.front]
-    if ev then
-        --syslog.debug(event_queue.front, event_queue.back, table.unpack(ev, 1, ev.n))
-        event_queue.front = event_queue.front + 1
-    else ev = empty_packed_table end
-    if eventHooks[ev[1]] then for _, v in ipairs(eventHooks[ev[1]]) do v(ev) end end
-    if ev[1] == "key" and ev[2] == keys.f10 then -- F10 (TODO: get real keys API)
+-- Basic built-in debugger for testing
+-- TODO: Improve this A LOT!
+eventHooks.key = eventHooks.key or {}
+eventHooks.key[#eventHooks.key+1] = function(ev)
+    if ev[2] == keys.f10 then
         term.clear()
         term.setCursorPos(1, 1)
         term.write("Entering debug console.")
@@ -114,33 +102,44 @@ while processes[init_pid] do
         term.setCursorBlink(false)
         term.clear()
     end
-    if ev[1] == "char" then
-        if currentTTY.flags.cbreak then currentTTY.buffer = currentTTY.buffer .. ev[2]
-        else currentTTY.preBuffer = currentTTY.preBuffer .. ev[2] end
-        if currentTTY.flags.echo then terminal.write(currentTTY, ev[2]) terminal.redraw(currentTTY) end
-    elseif ev[1] == "key" then
-        if ev[2] == keys.enter then
-            if currentTTY.flags.cbreak then
-                currentTTY.buffer = currentTTY.buffer .. "\n"
-            else
-                currentTTY.buffer = currentTTY.buffer .. currentTTY.preBuffer .. "\n"
-                currentTTY.preBuffer = ""
+end
+
+local ttyEvents = {char = true, key = true, key_up = true, mouse_click = true, mouse_up = true, mouse_drag = true, mouse_scroll = true, paste = true}
+
+local ok, err = xpcall(function()
+while processes[init_pid] do
+    if not allWaiting then os.queueEvent("__event_queue_back") end
+    while true do
+        local ev = table.pack(coroutine.yield())
+        local name = ev[1]
+        if name == "__event_queue_back" then break end
+        if eventHooks[name] then for _, v in ipairs(eventHooks[name]) do v(ev) end end
+        local pushedEvent = false
+        if eventParameterMap[name] then
+            local params = {}
+            for i = 2, #eventParameterMap[name] + 1 do
+                params[eventParameterMap[name][i-1]] = ev[i]
             end
-            if currentTTY.flags.echo then terminal.write(currentTTY, "\n") terminal.redraw(currentTTY) end
-        elseif ev[2] == keys.backspace then
-            if currentTTY.flags.cbreak then
-                
-            elseif #currentTTY.preBuffer > 0 then
-                currentTTY.preBuffer = currentTTY.preBuffer:sub(1, -2)
-                if currentTTY.flags.echo then terminal.write(currentTTY, "\b \b") terminal.redraw(currentTTY) end
+            if ttyEvents[name] and currentTTY.frontmostProcess then
+                currentTTY.frontmostProcess.eventQueue[#currentTTY.frontmostProcess.eventQueue+1] = {name, params}
+                pushedEvent = true
+            -- TODO: check more events
             end
         end
+        if allWaiting and pushedEvent then break end
     end
     allWaiting = true
-    for pid, process in pairs(processes) do if pid ~= 0 then
+    for pid, process in pairs(processes) do if pid ~= 0 and not process.paused then
+        local gotev, ev = false, nil
         local dead = true
         for tid, thread in pairs(process.threads) do
-            dead, allWaiting = executeThread(process, thread, ev, dead, allWaiting)
+            if not gotev and thread.status == "suspended" then
+                ev = table.remove(process.eventQueue, 1) -- TODO: decide whether to optimize this
+                gotev = true
+            end
+            if ev or thread.status ~= "suspended" then
+                dead, allWaiting = executeThread(process, thread, ev or empty_packed_table, dead, allWaiting)
+            end
         end
         if dead then
             process.isDead = true
@@ -152,5 +151,8 @@ while processes[init_pid] do
             processes[pid] = nil
         end
     end end
+    --if processes[init_pid].paused then panic("init program paused") end
     terminal.redraw(currentTTY)
 end
+end, debug.traceback)
+if not ok then syslog.log({level = 5}, err) end

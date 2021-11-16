@@ -44,7 +44,7 @@ eventHooks = {}
 for _, v in ipairs(fs.list(fs.combine(args.root, args.splitkernpath))) do
     local file, err = fs.open(fs.combine(args.root, args.splitkernpath, v), "rb")
     if not file then panic("Could not read kernel part " .. v .. ": " .. err) end
-    local fn, err = (loadstring or load)(file.readAll(), "@" .. fs.combine(args.root, args.splitkernpath, v))
+    local fn, err = (loadstring or load)(file.readAll(), --[["@" .. fs.combine(args.root, args.splitkernpath, v)]] "=kernel:" .. v)
     file.close()
     if not fn then panic("Could not load kernel part " .. v .. ": " .. err) end
     fn()
@@ -53,8 +53,6 @@ end
 -- == END LOADER ==
 
 if init_retval ~= nil then
-    term.setTextColor(16384)
-    term.write(tostring(init_retval))
-    term.setCursorPos(1, select(2, term.getCursorPos()) + 1)
+    syslog.log({level = 4}, "init exited with result", init_retval)
 end
 panic("init program exited")

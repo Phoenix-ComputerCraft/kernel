@@ -24,6 +24,9 @@ local function makeTTY(width, height)
         isGraphics = false,
         textBuffer = {},
         graphicsBuffer = {},
+        frontmostProcess = nil,
+        processList = {},
+        eof = false,
     }
     for y = 1, height do
         retval[y] = {(' '):rep(width), ('0'):rep(width), ('f'):rep(width)}
@@ -57,10 +60,59 @@ do
     if n then KERNEL.stdout, KERNEL.stderr, KERNEL.stdin = TTY[tonumber(n)], TTY[tonumber(n)], TTY[tonumber(n)] end
 end
 
+keysHeld = {ctrl = false, alt = false, shift = false}
+
 eventHooks.term_resize = eventHooks.term_resize or {}
+eventHooks.char = eventHooks.char or {}
+eventHooks.key = eventHooks.key or {}
+eventHooks.key_up = eventHooks.key_up or {}
 eventHooks.term_resize[#eventHooks.term_resize+1] = function()
     local w, h = term.getSize()
+    -- TODO
     --for i = 1, 8 do TTY[i]:resize(w, h) end
+end
+eventHooks.char[#eventHooks.char+1] = function(ev)
+    if not currentTTY.isLocked then
+        if currentTTY.flags.cbreak then currentTTY.buffer = currentTTY.buffer .. ev[2]
+        else currentTTY.preBuffer = currentTTY.preBuffer .. ev[2] end
+        if currentTTY.flags.echo then terminal.write(currentTTY, ev[2]) terminal.redraw(currentTTY) end
+    end
+end
+eventHooks.key[#eventHooks.key+1] = function(ev)
+    if not currentTTY.isLocked then
+        if ev[2] == keys.enter then
+            if currentTTY.flags.cbreak then
+                currentTTY.buffer = currentTTY.buffer .. "\n"
+            else
+                currentTTY.buffer = currentTTY.buffer .. currentTTY.preBuffer .. "\n"
+                currentTTY.preBuffer = ""
+            end
+            if currentTTY.flags.echo then terminal.write(currentTTY, "\n") terminal.redraw(currentTTY) end
+        elseif ev[2] == keys.backspace then
+            if currentTTY.flags.cbreak then
+                
+            elseif #currentTTY.preBuffer > 0 then
+                currentTTY.preBuffer = currentTTY.preBuffer:sub(1, -2)
+                if currentTTY.flags.echo then terminal.write(currentTTY, "\b \b") terminal.redraw(currentTTY) end
+            end
+        end
+    end
+    if ev[2] == keys.leftCtrl or ev[2] == keys.rightCtrl then keysHeld.ctrl = true
+    elseif ev[2] == keys.leftAlt or ev[2] == keys.rightAlt then keysHeld.alt = true
+    elseif ev[2] == keys.leftShift or ev[2] == keys.rightShift then keysHeld.shift = true end
+    if not currentTTY.flags.raw and currentTTY.frontmostProcess and keysHeld.ctrl and not keysHeld.alt and not keysHeld.shift then
+        if ev[2] == keys.c then syscalls.kill(KERNEL, nil, currentTTY.frontmostProcess.id, 2) terminal.write(currentTTY, "^C")
+        elseif ev[2] == keys.backslash then syscalls.kill(KERNEL, nil, currentTTY.frontmostProcess.id, 3) terminal.write(currentTTY, "^\\")
+        elseif ev[2] == keys.z then syscalls.kill(KERNEL, nil, currentTTY.frontmostProcess.id, 19) terminal.write(currentTTY, "^Z")
+        elseif ev[2] == keys.d then currentTTY.eof = true terminal.write(currentTTY, "^Z")
+        -- TODO: fill in other cool keys
+        end
+    end
+end
+eventHooks.key_up[#eventHooks.key_up+1] = function(ev)
+    if ev[2] == keys.leftCtrl or ev[2] == keys.rightCtrl then keysHeld.ctrl = false
+    elseif ev[2] == keys.leftAlt or ev[2] == keys.rightAlt then keysHeld.alt = false
+    elseif ev[2] == keys.leftShift or ev[2] == keys.rightShift then keysHeld.shift = false end
 end
 
 function terminal.redraw(tty, full)
@@ -475,6 +527,10 @@ end
 
 function syscalls.write(process, thread, ...)
     if not process.stdout then return end
+    if process ~= process.stdout.frontmostProcess then
+        syscalls.kill(KERNEL, nil, process.id, 22)
+        if process.paused then return kSyscallYield, "write" end
+    end
     local function write(t)
         if process.stdout.isTTY then terminal.write(process.stdout, t)
         else process.stdout.write(t) end
@@ -488,6 +544,10 @@ end
 
 function syscalls.writeerr(process, thread, ...)
     if not process.stderr then return end
+    if process ~= process.stderr.frontmostProcess then
+        syscalls.kill(KERNEL, nil, process.id, 22)
+        if process.paused then return kSyscallYield, "writeerr" end
+    end
     local function write(t)
         if process.stderr.isTTY then terminal.write(process.stderr, t)
         else process.stderr.write(t) end
@@ -501,7 +561,19 @@ end
 
 function syscalls.read(process, thread, n)
     if process.stdin then
+        if process.stdin.isTTY and process ~= process.stdin.frontmostProcess then
+            syscalls.kill(KERNEL, nil, process.id, 21)
+            if process.paused then return kSyscallYield, "readline" end
+        end
+        if process.stdin.eof then
+            process.stdin.eof = false
+            return nil
+        end
         while #process.stdin.buffer < n do
+            if process.stdin.eof then
+                process.stdin.eof = false
+                return nil
+            end
             if process.stdin.isTTY and not process.stdin.flags.delay then return nil end
             if process.stdin.read then process.stdin.buffer = process.stdin.buffer .. process.stdin.read(n)
             else return kSyscallYield, "read", n end
@@ -514,7 +586,19 @@ end
 
 function syscalls.readline(process, thread)
     if process.stdin then
+        if process.stdin.isTTY and process ~= process.stdin.frontmostProcess then
+            syscalls.kill(KERNEL, nil, process.id, 21)
+            if process.paused then return kSyscallYield, "readline" end
+        end
+        if process.stdin.eof then
+            process.stdin.eof = false
+            return nil
+        end
         while not process.stdin.buffer:find("\n") do
+            if process.stdin.eof then
+                process.stdin.eof = false
+                return nil
+            end
             if process.stdin.isTTY and not process.stdin.flags.delay then return nil end
             if process.stdin.read then process.stdin.buffer = process.stdin.buffer .. process.stdin.read()
             else return kSyscallYield, "readline" end
@@ -529,6 +613,10 @@ end
 function syscalls.termctl(process, thread, flags)
     expect(1, flags, "table", "nil")
     if not process.stdout or not process.stdout.isTTY then return nil end
+    if process ~= process.stdout.frontmostProcess then
+        syscalls.kill(KERNEL, nil, process.id, 22)
+        if process.paused then return kSyscallYield, "termctl", flags end
+    end
     if flags then
         expect.field(flags, "cbreak", "boolean", "nil")
         expect.field(flags, "delay", "boolean", "nil")
@@ -545,6 +633,10 @@ end
 
 function syscalls.openterm(process, thread)
     if not process.stdout or not process.stdout.isTTY then return nil, "No valid TTY attached" end
+    if process ~= process.stdout.frontmostProcess then
+        syscalls.kill(KERNEL, nil, process.id, 22)
+        if process.paused then return kSyscallYield, "openterm" end
+    end
     if process.stdout.isLocked then return nil, "Terminal already in use" end
     local size = process.stdout.size
     local buffer = {
@@ -757,6 +849,10 @@ end
 function syscalls.opengfx(process, thread)
     if not term.drawPixels then return nil, "Graphics mode not supported" end
     if not process.stdout or not process.stdout.isTTY then return nil, "No valid TTY attached" end
+    if process ~= process.stdout.frontmostProcess then
+        syscalls.kill(KERNEL, nil, process.id, 22)
+        if process.paused then return kSyscallYield, "opengfx" end
+    end
     if process.stdout.isLocked then return nil, "Terminal already in use" end
     local size = process.stdout.size
     local buffer = {
@@ -947,6 +1043,11 @@ function syscalls.stdin(process, thread, handle)
         if handle.isTTY then
             handle = userTTYs[handle]
             if not handle then error("bad argument #1 (invalid TTY)", 2) end
+            if process.stdin.frontmostProcess ~= process then
+                process.stdin.frontmostProcess = table.remove(process.stdin.processList)
+                handle.processList[#handle.processList+1] = handle.frontmostProcess
+                handle.frontmostProcess = process
+            end
         else
             expect.field(handle, "read", "function")
             local read = handle.read
@@ -970,6 +1071,11 @@ function syscalls.stdout(process, thread, handle)
         if handle.isTTY then
             handle = userTTYs[handle]
             if not handle then error("bad argument #1 (invalid TTY)", 2) end
+            if process.stdout.frontmostProcess ~= process then
+                process.stdout.frontmostProcess = table.remove(process.stdout.processList)
+                handle.processList[#handle.processList+1] = handle.frontmostProcess
+                handle.frontmostProcess = process
+            end
         else
             expect.field(handle, "write", "function")
             local write = handle.write
@@ -992,6 +1098,11 @@ function syscalls.stderr(process, thread, handle)
         if handle.isTTY then
             handle = userTTYs[handle]
             if not handle then error("bad argument #1 (invalid TTY)", 2) end
+            if process.stderr.frontmostProcess ~= process then
+                process.stderr.frontmostProcess = table.remove(process.stderr.processList)
+                handle.processList[#handle.processList+1] = handle.frontmostProcess
+                handle.frontmostProcess = process
+            end
         else
             expect.field(handle, "write", "function")
             local write = handle.write

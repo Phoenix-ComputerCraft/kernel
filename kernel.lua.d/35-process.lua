@@ -13,6 +13,9 @@ local process_template = {
     cputime = 0.2,
     env = {},
     syscallyield = nil,
+    eventQueue = {},
+    signalHandlers = {},
+    paused = false,
     threads = {
         [0] = {
             id = 0,
@@ -48,10 +51,19 @@ local function preempt_hook()
     coroutine.yield("preempt", "test", 7)
 end
 
-local function reap_process(process)
+function reap_process(process)
     -- TODO: finish this
     syslog.debug("Reaping process " .. process.id .. " (" .. process.name .. ")")
     for _, v in ipairs(process.dependents) do v:gc() end
+    if process.stdin and process.stdin.isTTY and process.stdin.frontmostProcess == process then
+        process.stdin.frontmostProcess = table.remove(process.stdin.processList)
+    end
+    if process.stdout and process.stdout.isTTY and process.stdout.frontmostProcess == process then
+        process.stdout.frontmostProcess = table.remove(process.stdout.processList)
+    end
+    if process.stderr and process.stdout.isTTY and process.stdout.frontmostProcess == process then
+        process.stdout.frontmostProcess = table.remove(process.stdout.processList)
+    end
 end
 
 function syscalls.getpid(process, thread)
@@ -103,6 +115,27 @@ function syscalls.fork(process, thread, func, name, ...)
         stderr = process.stderr,
         cputime = 0,
         syscallyield = nil,
+        eventQueue = {},
+        signalHandlers = {
+            [1] = function() return coroutine.yield("syscall", "exit", 1) end,
+            [2] = function() return coroutine.yield("syscall", "exit", 1) end,
+            [3] = function()
+                -- TODO: finalize this behavior
+                coroutine.yield("syscall", "syslog", {level = 4, category = "Application Error"}, debug.traceback("Quit"))
+                return coroutine.yield("syscall", "exit", 1)
+            end,
+            [6] = function(err)
+                -- TODO: finalize this behavior
+                coroutine.yield("syscall", "syslog", {level = 4, category = "Application Error"}, debug.traceback(err or "Aborted"))
+                return coroutine.yield("syscall", "exit", 1)
+            end,
+            [13] = function() return coroutine.yield("syscall", "exit", 1) end,
+            [15] = function() return coroutine.yield("syscall", "exit", 1) end,
+            [19] = function() processes[id].paused = true end,
+            [21] = function() processes[id].paused = true end,
+            [22] = function() processes[id].paused = true end,
+        },
+        paused = false,
         threads = {
             [0] = {
                 id = 0,
@@ -116,6 +149,7 @@ function syscalls.fork(process, thread, func, name, ...)
     }
     processes[id].env = mkenv(processes[id])
     setfenv(func, processes[id].env)
+    -- TODO: Decide who gets the TTY here
     if args.preemptive then debug.sethook(processes[id].threads[0].coro, preempt_hook, "", args.quantum) end
     return id
 end
@@ -143,6 +177,7 @@ function syscalls.exec(process, thread, path, ...)
         local func, err = load(contents, "@" .. path, "bt")
         if not func then error("Could not execute file: " .. err, 0) end
         local id = process.id
+        local p
         processes[id] = {
             id = id,
             name = path,
@@ -155,6 +190,27 @@ function syscalls.exec(process, thread, path, ...)
             stderr = process.stderr,
             cputime = 0,
             syscallyield = nil,
+            eventQueue = {},
+            signalHandlers = {
+                [1] = function() return coroutine.yield("syscall", "exit", 1) end,
+                [2] = function() return coroutine.yield("syscall", "exit", 1) end,
+                [3] = function()
+                    -- TODO: finalize this behavior
+                    coroutine.yield("syscall", "syslog", {level = 4, category = "Application Error"}, debug.traceback("Quit"))
+                    return coroutine.yield("syscall", "exit", 1)
+                end,
+                [6] = function(err)
+                    -- TODO: finalize this behavior
+                    coroutine.yield("syscall", "syslog", {level = 4, category = "Application Error"}, debug.traceback(err or "Aborted"))
+                    return coroutine.yield("syscall", "exit", 1)
+                end,
+                [13] = function() return coroutine.yield("syscall", "exit", 1) end,
+                [15] = function() return coroutine.yield("syscall", "exit", 1) end,
+                [19] = function() p.paused = true end,
+                [21] = function() p.paused = true end,
+                [22] = function() p.paused = true end,
+            },
+            paused = false,
             threads = {
                 [0] = {
                     id = 0,
@@ -166,10 +222,23 @@ function syscalls.exec(process, thread, path, ...)
                 }
             }
         }
+        p = processes[id]
         processes[id].env = mkenv(processes[id])
         setfenv(func, processes[id].env)
         if args.preemptive then debug.sethook(processes[id].threads[0].coro, preempt_hook, "", args.quantum) end
         reap_process(process)
+        if process.stdin and process.stdin.isTTY then
+            process.stdin.processList[#process.stdin.processList+1] = process.stdin.frontmostProcess
+            process.stdin.frontmostProcess = processes[id]
+        end
+        if process.stdout and process.stdout.isTTY and process.stdout.frontmostProcess ~= processes[id] then
+            process.stdout.processList[#process.stdout.processList+1] = process.stdout.frontmostProcess
+            process.stdout.frontmostProcess = processes[id]
+        end
+        if process.stderr and process.stderr.isTTY and process.stderr.frontmostProcess ~= processes[id] then
+            process.stderr.processList[#process.stderr.processList+1] = process.stderr.frontmostProcess
+            process.stderr.frontmostProcess = processes[id]
+        end
     end
 end
 
@@ -190,7 +259,8 @@ function syscalls.newthread(process, thread, func, ...)
 end
 
 function syscalls.exit(process, thread, code)
-
+    -- TODO
+    for _, thread in pairs(process.threads) do thread.status = "dead" end
 end
 
 function syscalls.waitpid(process, thread, pid)

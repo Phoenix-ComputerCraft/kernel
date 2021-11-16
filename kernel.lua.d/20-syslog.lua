@@ -268,12 +268,12 @@ end
 local oldpanic = panic
 -- This function can be called either standalone or from within xpcall.
 function panic(message)
-    syslog.log({level = 5, category = "Panic"}, "Kernel panic:", message)
+    syslog.log({level = 6}, "Kernel panic:", message)
     if debug then
         local traceback = debug.traceback(nil, 2)
-        syslog.log({level = 5, category = "Panic"}, traceback)
+        syslog.log({level = 6}, traceback)
     end
-    syslog.log({level = 5, category = "Panic"}, "We are hanging here...")
+    syslog.log({level = 6}, "We are hanging here...")
     while true do coroutine.yield() end
 end
 

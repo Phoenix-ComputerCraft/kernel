@@ -50,7 +50,7 @@ end
 
 -- load is the de facto loader - loadstring will no longer be available. Since load isn't available on 5.1 (at least for strings), we shim it first.
 if loadstring and setfenv then
-    local old_load, old_loadstring = load, loadstring
+    local old_load, old_loadstring, expect = load, loadstring, expect
     function load(chunk, name, mode, env)
         expect(1, chunk, "string", "function")
         expect(2, name, "string", "nil")
@@ -215,7 +215,7 @@ function executeThread(process, thread, ev, dead, allWaiting)
     if thread.status == "starting" then args = thread.args
     elseif thread.status == "syscall" then args = thread.syscall_return
     elseif thread.status == "preempt" then args = empty_packed_table
-    elseif thread.status == "suspended" then args = ev end
+    elseif thread.status == "suspended" then args = {ev[1], deepcopy(ev[2])} end
     if thread.status ~= "dead" and (not thread.filter or thread.filter(process, thread, ev)) then
         local old_dead = dead
         dead = false
@@ -265,6 +265,7 @@ function executeThread(process, thread, ev, dead, allWaiting)
             --syslog.debug("Standard yield", params.n, table.unpack(params, 1, params.n))
             --syslog.debug(debug.traceback(thread.coro))
             thread.status = "suspended"
+            allWaiting = allWaiting and #process.eventQueue == 0
         end
     end
     return dead, allWaiting
