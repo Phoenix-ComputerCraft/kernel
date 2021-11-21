@@ -104,7 +104,7 @@ eventHooks.key[#eventHooks.key+1] = function(ev)
         if ev[2] == keys.c then syscalls.kill(KERNEL, nil, currentTTY.frontmostProcess.id, 2) terminal.write(currentTTY, "^C")
         elseif ev[2] == keys.backslash then syscalls.kill(KERNEL, nil, currentTTY.frontmostProcess.id, 3) terminal.write(currentTTY, "^\\")
         elseif ev[2] == keys.z then syscalls.kill(KERNEL, nil, currentTTY.frontmostProcess.id, 19) terminal.write(currentTTY, "^Z")
-        elseif ev[2] == keys.d then currentTTY.eof = true terminal.write(currentTTY, "^Z")
+        elseif ev[2] == keys.d then currentTTY.eof = true terminal.write(currentTTY, "^D")
         -- TODO: fill in other cool keys
         end
     end

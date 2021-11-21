@@ -29,7 +29,7 @@ local process_template = {
 }
 
 local function mkenv(process)
-    local env = deepcopy(G)
+    local env = createLuaLib(process)
     if _VERSION < "Lua 5.2" then
         -- Emulate _ENV environments on Lua 5.1
         setmetatable(env, {
@@ -183,7 +183,8 @@ function syscalls.exec(process, thread, path, ...)
             name = path,
             user = process.user,
             dependents = {},
-            parent = process.id,
+            parent = process.parent,
+            env = process.env,
             dir = process.dir,
             stdin = process.stdin,
             stdout = process.stdout,
@@ -223,7 +224,6 @@ function syscalls.exec(process, thread, path, ...)
             }
         }
         p = processes[id]
-        processes[id].env = mkenv(processes[id])
         setfenv(func, processes[id].env)
         if args.preemptive then debug.sethook(processes[id].threads[0].coro, preempt_hook, "", args.quantum) end
         reap_process(process)
@@ -261,19 +261,6 @@ end
 function syscalls.exit(process, thread, code)
     -- TODO
     for _, thread in pairs(process.threads) do thread.status = "dead" end
-end
-
-function syscalls.waitpid(process, thread, pid)
-    -- Really basic for now
-    -- TODO: make this do more
-    if not processes[pid] then return nil
-    elseif not processes[pid].isDead then return kSyscallYield, "waitpid", pid
-    else
-        local retval = processes[pid].threads[0].return_value
-        reap_process(processes[pid])
-        processes[pid] = nil
-        return retval
-    end
 end
 
 function syscalls.getplist(process, thread)

@@ -1,7 +1,7 @@
-function syscalls.getuid(process, thread)
+function syscalls.getuser(process, thread)
     return process.user
 end
 
-function syscalls.setuid(process, thread, uid)
+function syscalls.setuser(process, thread, user)
 
 end

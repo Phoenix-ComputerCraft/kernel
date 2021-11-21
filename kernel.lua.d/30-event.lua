@@ -1,3 +1,6 @@
+timerMap = {}
+alarmMap = {}
+
 function syscalls.kill(process, thread, pid, signal)
     expect(1, pid, "number")
     expect(2, signal, "number")
@@ -36,6 +39,34 @@ function syscalls.sendEvent(process, thread, pid, name, params)
     -- TODO: figure out filtering
     target.eventQueue[#target.eventQueue+1] = {"remote_event", {type = name, sender = process.id, data = params}}
     return true
+end
+
+function syscalls.timer(process, thread, timeout)
+    expect(1, timeout, "number")
+    local tm = os.startTimer(timeout)
+    timerMap[tm] = process
+    return bit32.band(tm, 0x7FFFFFFF)
+end
+
+function syscalls.alarm(process, thread, timeout)
+    expect(1, timeout, "number")
+    local tm = os.setAlarm(timeout)
+    alarmMap[tm] = process
+    return bit32.bor(tm, 0x80000000)
+end
+
+function syscalls.cancel(process, thread, tm)
+    expect(1, tm, "number")
+    if bit32.band(tm, 0x80000000) then
+        tm = bit32.band(tm, 0x7FFFFFFF)
+        if alarmMap[tm] ~= process then error("No such alarm") end
+        os.cancelAlarm(tm)
+        alarmMap[tm] = nil
+    else
+        if timerMap[tm] ~= process then error("No such timer") end
+        os.cancelTimer(tm)
+        timerMap[tm] = nil
+    end
 end
 
 eventHooks.terminate = eventHooks.terminate or {}

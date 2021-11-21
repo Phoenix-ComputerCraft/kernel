@@ -1,6 +1,5 @@
 -- temp mount
 mounts[""] = filesystems[args.rootfstype]:new(KERNEL, args.root, {})
-G.periphemu = periphemu
 syslogs.default.file = filesystem.open(KERNEL, "/var/log/default.log", "a")
 
 local empty_packed_table = {n = 0}
@@ -123,6 +122,11 @@ while processes[init_pid] do
             if ttyEvents[name] and currentTTY.frontmostProcess then
                 currentTTY.frontmostProcess.eventQueue[#currentTTY.frontmostProcess.eventQueue+1] = {name, params}
                 pushedEvent = true
+            elseif name == "timer" or name == "alarm" then
+                local proc
+                if name == "timer" then proc = timerMap[ev[2]]
+                else proc, params.id = alarmMap[ev[2]], bit32.bor(params.id, 0x80000000) end
+                if proc then proc.eventQueue[#proc.eventQueue+1], pushedEvent = {name, params}, true end
             -- TODO: check more events
             end
         end
@@ -139,16 +143,18 @@ while processes[init_pid] do
             end
             if ev or thread.status ~= "suspended" then
                 dead, allWaiting = executeThread(process, thread, ev or empty_packed_table, dead, allWaiting)
-            end
+            else dead = false end
         end
         if dead then
             process.isDead = true
-            -- TODO: queue event instead of forcing resume
-            allWaiting = false
-        end
-        if dead and pid == init_pid then
-            init_retval = process.threads[0].return_value
+            if pid == init_pid then
+                init_retval = process.threads[0].return_value
+            elseif processes[process.parent] then
+                processes[process.parent].eventQueue[#processes[process.parent].eventQueue+1] = {"process_complete", {pid = pid, return_value = process.threads[0].return_value}}
+            end
+            reap_process(process)
             processes[pid] = nil
+            allWaiting = false
         end
     end end
     --if processes[init_pid].paused then panic("init program paused") end

@@ -144,6 +144,24 @@ if bit then
     bit = nil
 end
 
+-- Implement miscellaneous Lua 5.2 functionality if on 5.1
+if _VERSION == "Lua 5.1" then
+    if not table.pack then table.pack = function(...)
+        local t = {...}
+        t.n = select("#", ...)
+        return t
+    end end
+    if not table.unpack then table.unpack, unpack = unpack, nil end
+
+    local old_xpcall = xpcall
+    xpcall = function(f, errh, ...)
+        if select("#", ...) > 0 then
+            local args = table.pack(...)
+            return old_xpcall(function() return f(table.unpack(args, 1, args.n)) end, errh)
+        else return old_xpcall(f, errh) end
+    end
+end
+
 -- Early version of panic function, before log initialization finishes (this is redefined later to use syslog)
 function panic(message)
     term.setBackgroundColor(32768)
