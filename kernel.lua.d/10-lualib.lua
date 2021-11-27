@@ -16,56 +16,30 @@ function createLuaLib(process)
         return fn()
     end
 
-    if loadstring and _VERSION == "Lua 5.1" then
-        local _load, _loadstring = load, loadstring
+    local load = load
+    if _VERSION == "Lua 5.1" then
         function G.load(chunk, name, mode, env)
-            if name ~= nil and type(name) ~= "string" then error("bad argument #2 (expected string, got " .. type(name) .. ")", 2) end
-            if mode ~= nil and type(mode) ~= "string" then error("bad argument #3 (expected string, got " .. type(mode) .. ")", 2) end
-            if env ~= nil and type(env) ~= "table" then error("bad argument #4 (expected table, got " .. type(env) .. ")", 2) end
-            local fn, err
-            if type(chunk) == "string" then
-                if mode then
-                    if chunk:sub(1, 4) == "\033Lua" then if not mode:find("b") then error("attempt to load a binary chunk (mode is '" .. mode .. "')", 2) end
-                    elseif not mode:find("t") then error("attempt to load a text chunk (mode is '" .. mode .. "')", 2) end
+            -- Shadow environment table to add proper _ENV support
+            -- TODO: Figure out if this could break anything
+            env = env or process.env
+            return load(chunk, name, mode, setmetatable({}, {
+                __index = function(_, idx)
+                    if idx == "_ENV" then return env
+                    else return env[idx] end
+                end,
+                __newindex = function(_, idx, val)
+                    if idx == "_ENV" then env = val
+                    else env[idx] = val end
+                end,
+                __pairs = function()
+                    return next, env
+                end,
+                __len = function()
+                    return #env
                 end
-                fn, err = _loadstring(chunk, name)
-            elseif type(chunk) == "function" then
-                if mode then
-                    local cf, init = chunk, ""
-                    while #init < 4 do
-                        local s = cf()
-                        if not s then break end
-                        init = init .. s
-                    end
-                    if init:sub(1, 4) == "\033Lua" then if not mode:find("b") then error("attempt to load a binary chunk (mode is '" .. mode .. "')", 2) end
-                    elseif not mode:find("t") then error("attempt to load a text chunk (mode is '" .. mode .. "')", 2) end
-                    function chunk()
-                        if init then
-                            local a = init
-                            init = nil
-                            return a
-                        else return cf() end
-                    end
-                end
-                fn, err = _load(chunk, name)
-            else error("bad argument #1 (expected string or function, got " .. type(chunk) .. ")", 2) end
-            if not fn then return nil, err end
-            local mt = getmetatable(env)
-            if not mt then mt = {} setmetatable(env, mt) end
-            local __index, __newindex = mt.__index, mt.__newindex
-            function mt:__index(idx)
-                if idx == "_ENV" then return getfenv(2)
-                elseif type(__index) == "table" then return __index[idx]
-                elseif type(__index) == "function" then return __index(self, idx) end
-            end
-            function mt:__newindex(idx, val)
-                if idx == "_ENV" then setfenv(2, val)
-                elseif type(__newindex) == "function" then return __newindex(self, idx, val) end
-            end
-            setfenv(fn, env)
-            return fn
+            }))
         end
-    else G.load = load end
+    else G.load = function(chunk, name, mode, env) return load(chunk, name, mode, env or process.env) end end
 
     function G.loadfile(path, mode, env)
         if env == nil and type(mode) == "table" then env, mode = mode, nil end
@@ -92,10 +66,11 @@ function createLuaLib(process)
     G.bit32 = deepcopy(bit32)
 
     local oldcreate = coroutine.create
+    local sethook = debug.sethook
     function G.coroutine.create(func)
         -- since the hook is inherited (not good in child coroutines!) we need to erase it
         local coro = oldcreate(func)
-        if coro and debug then debug.sethook(coro, nil, "", 0) end
+        if coro and debug then sethook(coro, nil, "", 0) end
         return coro
     end
 
@@ -108,27 +83,25 @@ function createLuaLib(process)
         end,
         read = function(self, fmt, ...)
             local s, e
-            if type(fmt) == "number" then while #stdin_buffer < fmt do stdin_buffer = stdin_buffer .. do_syscall("read") end
+            if type(fmt) == "number" then while #stdin_buffer < fmt do stdin_buffer = stdin_buffer .. do_syscall("read", fmt) end
             elseif type(fmt) == "string" then
                 fmt = fmt:gsub("^%*", "")
                 if fmt == "n" then
                     while not stdin_buffer:find("%d") do
-                        local r = do_syscall("read")
+                        local r = do_syscall("readline")
                         if r == nil then break end
-                        stdin_buffer = stdin_buffer .. do_syscall("read")
+                        stdin_buffer = stdin_buffer .. r
                     end
                 elseif fmt == "a" then
                     while true do
-                        local r = do_syscall("read")
+                        local r = do_syscall("readline")
                         if r == nil then break end
-                        stdin_buffer = stdin_buffer .. do_syscall("read")
+                        stdin_buffer = stdin_buffer .. r
                     end
                 elseif fmt == "l" or fmt == "L" then
-                    while not stdin_buffer:find("\n") do
-                        local r = do_syscall("read")
-                        if r == nil then break end
-                        stdin_buffer = stdin_buffer .. do_syscall("read")
-                    end
+                    local r = do_syscall("readline")
+                    if r == nil then return nil end
+                    stdin_buffer = stdin_buffer .. r .. "\n"
                 else error("bad argument (invalid format '" .. fmt .. "')", 2) end
             else error("bad argument (expected string or number, got " .. type(fmt), 2) end
             if type(fmt) == "number" then s, e = stdin_buffer:sub(1, fmt), fmt + 1
@@ -136,6 +109,7 @@ function createLuaLib(process)
             elseif fmt == "a" then s, e = stdin_buffer, #stdin_buffer + 1
             elseif fmt == "l" then s, e = stdin_buffer:match("(.*)\n()")
             else s, e = stdin_buffer:match("(.*\n)()") end
+            if not s then return nil end
             stdin_buffer = stdin_buffer:sub(e)
             if select("#", ...) > 0 then return s, self:read(...)
             else return s end
@@ -341,12 +315,7 @@ function createLuaLib(process)
     }
 
     G.debug = deepcopy(debug) -- since debug is protected, we can pretty much just stick it in here and be alright
-
-    -- This adds the coroutine library to coroutine types, and allows calling coroutines to resume
-    -- ex: while coro:status() == "suspended" do coro("hello") end
-    -- This should be a thing in base Lua, but since not we'll make it available system-wide!
-    -- Programs can rely on this behavior existing (even though it may be unavailable if debug is disabled, but CC:T 1.96 removes the ability to disable it anyway)
-    if debug then debug.setmetatable(coroutine.running(), {__index = G.coroutine, __call = coroutine.resume}) end
+    -- TODO: Restrict hook modification so programs can't arbitrarily disable preemption
 
     createRequire(process, G)
 

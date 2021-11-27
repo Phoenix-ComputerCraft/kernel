@@ -1,6 +1,7 @@
 local nextMutexID = 0
 
 local mutex = {}
+local do_syscall = do_syscall
 
 function mutex:lock()
     return do_syscall("lockmutex", self)
@@ -13,6 +14,8 @@ end
 function mutex:try_lock()
     return do_syscall("trylockmutex", self)
 end
+
+for _, v in pairs(mutex) do setfenv(v, setmetatable({}, {__newindex = function() end, __metatable = false})) debug.protect(v) end
 
 -- make this a library function?
 function syscalls.newmutex(process, thread, recursive)

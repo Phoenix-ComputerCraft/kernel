@@ -36,6 +36,7 @@ filesystem = {}
 terminal = {}
 user = {}
 syslog = {}
+modules = {}
 
 eventHooks = {}
 

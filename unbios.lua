@@ -98,5 +98,13 @@ if debug then
     restoreValue(http, "request", "nativeHTTPRequest", 3)
     restoreValue(os, "shutdown", "nativeShutdown", 1)
     restoreValue(os, "reboot", "nativeReboot", 1)
+    do
+        local i, key, value = 1, debug.getupvalue(peripheral.isPresent, 2)
+        while key ~= "native" and key ~= nil do
+            key, value = debug.getupvalue(peripheral.isPresent, i)
+            i=i+1
+        end
+        _G.peripheral = value or peripheral
+    end
 end
 coroutine.yield()

@@ -1,7 +1,3 @@
--- temp mount
-mounts[""] = filesystems[args.rootfstype]:new(KERNEL, args.root, {})
-syslogs.default.file = filesystem.open(KERNEL, "/var/log/default.log", "a")
-
 local empty_packed_table = {n = 0}
 local init_process = processes[syscalls.fork(KERNEL, nil, function() end, "init")]
 local init_pid = init_process.id
@@ -148,9 +144,9 @@ while processes[init_pid] do
         if dead then
             process.isDead = true
             if pid == init_pid then
-                init_retval = process.threads[0].return_value
+                init_retval = process.lastReturnValue.value or process.lastReturnValue.error
             elseif processes[process.parent] then
-                processes[process.parent].eventQueue[#processes[process.parent].eventQueue+1] = {"process_complete", {pid = pid, return_value = process.threads[0].return_value}}
+                processes[process.parent].eventQueue[#processes[process.parent].eventQueue+1] = {"process_complete", process.lastReturnValue}
             end
             reap_process(process)
             processes[pid] = nil

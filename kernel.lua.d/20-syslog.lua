@@ -274,8 +274,11 @@ function panic(message)
         syslog.log({level = 6}, traceback)
     end
     syslog.log({level = 6}, "We are hanging here...")
+    term.setCursorBlink(false)
     while true do coroutine.yield() end
 end
+
+syslogs.default.file = filesystem.open(KERNEL, "/var/log/default.log", "a")
 
 syslog.log("Initialized system logger")
 syslog.log("System started at " .. systemStartTime .. " on computer " .. os.computerID() .. (os.computerLabel() and "('" .. os.computerLabel() .. "')" or ""))

@@ -162,6 +162,16 @@ if _VERSION == "Lua 5.1" then
     end
 end
 
+-- This adds the coroutine library to coroutine types, and allows calling coroutines to resume
+-- ex: while coro:status() == "suspended" do coro("hello") end
+-- This should be a thing in base Lua, but since not we'll make it available system-wide!
+-- Programs can rely on this behavior existing (even though it may be unavailable if debug is disabled, but CC:T 1.96 removes the ability to disable it anyway)
+-- Note: Unfortunately, CraftOS-PC v2.6.2 and earlier have a bug preventing this from working
+if debug then
+    local coro = setmetatable({}, {__index = coroutine, __newindex = function() end, __metatable = false})
+    debug.setmetatable(coroutine.running(), {__index = coro, __call = coroutine.resume})
+end
+
 -- Early version of panic function, before log initialization finishes (this is redefined later to use syslog)
 function panic(message)
     term.setBackgroundColor(32768)
@@ -271,13 +281,14 @@ function executeThread(process, thread, ev, dead, allWaiting)
             allWaiting = false
         elseif coroutine.status(thread.coro) == "dead" then
             thread.status = "dead"
-            thread.return_value = params[2]
+            if process[1] then process.lastReturnValue = {pid = process.id, thread = thread.id, value = params[2], n = params.n - 1, table.unpack(params, 2, params.n)}
+            else process.lastReturnValue = {pid = process.id, thread = thread.id, error = process[2], traceback = debug.traceback(thread.coro)} end
             if not params[1] then
                 thread.did_error = true
                 syslog.log({level = 0, process = process.id, thread = thread.id, category = "Application Error"}, debug.traceback(thread.coro, params[2]))
                 if params[2] and process.stderr and process.stderr.isTTY then terminal.write(process.stderr, params[2] .. "\n") end
             end
-            -- TODO: handle reaping?
+            process.threads[thread.id] = nil
             dead = old_dead
         else
             --syslog.debug("Standard yield", params.n, table.unpack(params, 1, params.n))

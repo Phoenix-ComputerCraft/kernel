@@ -240,6 +240,7 @@ function filesystems.craftos:remove(process, path)
     end
     checkWriteRecursive(path)
     fs.remove(fs.combine(self.path, path))
+    self:setmeta(process.user, fs.combine(self.path, path), nil)
 end
 
 function filesystems.craftos:rename(process, from, to)
@@ -256,6 +257,8 @@ function filesystems.craftos:rename(process, from, to)
     local perms = tostat.permissions[process.user] or tostat.worldPermissions
     if not perms.write then error(to .. ": Permission denied", 2) end
     fs.move(fs.combine(self.path, from), fs.combine(self.path, to))
+    self:setmeta(process.user, fs.combine(self.path, to), self:getmeta(process.user, fs.combine(self.path, from)))
+    self:setmeta(process.user, fs.combine(self.path, from), nil)
 end
 
 function filesystems.craftos:mkdir(process, path)
@@ -415,13 +418,16 @@ function filesystems.tmpfs:new(process, src, options)
     }, {__index = self})
 end
 
--- TODO: check if this exposes any vulnerabilities through upvalues (dbprotect required?)
 function filesystems.tmpfs:_open_internal(user, path, mode)
     local pos = 0
     local closed = false
+    local function setenv(t)
+        for _, v in pairs(t) do setfenv(v, process.env) debug.protect(v) end
+        return t
+    end
     if mode == "r" then
         local data = self:getpath(user, path).data
-        return {
+        return setenv {
             readLine = function(newline)
                 if closed then error("attempt to use a closed file", 2) end
                 if pos > #data then return nil end
@@ -454,7 +460,7 @@ function filesystems.tmpfs:_open_internal(user, path, mode)
         local data = self:getpath(user, path)
         if mode == "w" then data.data, data.modified = "", os.epoch "utc" else pos = #data.data end
         local buf = data.data
-        return {
+        return setenv {
             write = function(d)
                 if closed then error("attempt to use a closed file", 2) end
                 buf = buf .. tostring(d)
@@ -475,7 +481,7 @@ function filesystems.tmpfs:_open_internal(user, path, mode)
         }
     elseif mode == "rb" then
         local data = self:getpath(user, path).data
-        return {
+        return setenv {
             readLine = function(newline)
                 if closed then error("attempt to use a closed file", 2) end
                 if pos > #data then return nil end
@@ -525,11 +531,17 @@ function filesystems.tmpfs:_open_internal(user, path, mode)
         local data = self:getpath(user, path)
         if mode == "wb" then data.data, data.modified = "", os.epoch "utc" else pos = #data.data end
         local buf = data.data
-        return {
+        return setenv {
             write = function(d)
                 if closed then error("attempt to use a closed file", 2) end
-                if type(d) == "number" then buf = buf:sub(1, pos - 1) .. string.char(d) .. buf:sub(pos)
-                elseif type(d) == "string" then buf = buf:sub(1, pos - 1) .. d .. buf:sub(pos)
+                if type(d) == "number" then buf = buf:sub(1, pos - 1) .. string.char(d) .. buf:sub(pos + 1)
+                elseif type(d) == "string" then buf = buf:sub(1, pos - 1) .. d .. buf:sub(pos + #d)
+                else error("bad argument #1 (expected string or number, got " .. type(d) .. ")", 2) end
+            end,
+            writeLine = function(d)
+                if closed then error("attempt to use a closed file", 2) end
+                if type(d) == "number" then buf = buf:sub(1, pos - 1) .. string.char(d) .. "\n" .. buf:sub(pos + 2)
+                elseif type(d) == "string" then buf = buf:sub(1, pos - 1) .. d .. "\n" .. buf:sub(pos + #d + 1)
                 else error("bad argument #1 (expected string or number, got " .. type(d) .. ")", 2) end
             end,
             seek = function(whence, offset)
@@ -770,7 +782,7 @@ end
 
 local function getMount(process, path)
     local fullPath = split(fs.combine(path:sub(1, 1) == "/" and "" or process.dir, path), "/\\")
-    if #fullPath == 0 then return mounts[""], path end
+    if #fullPath == 0 then return mounts[""], path, "" end
     local maxPath
     for k in pairs(mounts) do
         local ok = true
@@ -781,7 +793,7 @@ local function getMount(process, path)
     local parts = split(maxPath, "/\\")
     local p = #fullPath >= #parts + 1 and fs.combine(table.unpack(fullPath, #parts + 1, #fullPath)) or ""
     syslog.debug(path, #parts, #fullPath, p)
-    return mounts[maxPath], p
+    return mounts[maxPath], p, maxPath
 end
 
 function filesystem.open(process, path, mode)
@@ -880,6 +892,13 @@ function filesystem.unmount(process, path)
     mounts[fs.combine(path)] = nil
 end
 
+function filesystem.mountpoint(process, path)
+    expect(0, process, "table")
+    expect(1, path, "string")
+    local _, _, mp = getMount(process, path)
+    return "/" .. mp
+end
+
 function filesystem.combine(first, ...)
     local str = fs.combine(first, ...)
     if first:match "^/" then str = "/" .. str end
@@ -896,6 +915,7 @@ function syscalls.chmod(process, thread, ...) return filesystem.chmod(process, .
 function syscalls.chown(process, thread, ...) return filesystem.chown(process, ...) end
 function syscalls.mount(process, thread, ...) return filesystem.mount(process, ...) end
 function syscalls.unmount(process, thread, ...) return filesystem.unmount(process, ...) end
+function syscalls.mountpoint(process, thread, ...) return filesystem.mountpoint(process, ...) end
 function syscalls.combine(process, thread, ...) return filesystem.combine(...) end
 
 -- This syscall provides CraftOS APIs (and modules) without having to mount the entire ROM.
@@ -904,16 +924,21 @@ function syscalls.combine(process, thread, ...) return filesystem.combine(...) e
 function syscalls.loadCraftOSAPI(process, thread, apiName)
     expect(1, apiName, "string")
     local env
-    env = setmetatable({dofile = function(path)
-        local file, err = fs.open(path, "rb")
-        if not file then error("Could not open module: " .. err, 0) end
-        local fn, err = load(file.readAll(), "@" .. path, nil, env)
-        file.close()
-        if not fn then error("Could not load module: " .. err, 0) end
-        return fn()
-    end}, {__index = process.env})
+    env = setmetatable({
+        dofile = function(path)
+            local file, err = fs.open(path, "rb")
+            if not file then error("Could not open module: " .. err, 0) end
+            local fn, err = load(file.readAll(), "@" .. path, nil, env)
+            file.close()
+            if not fn then error("Could not load module: " .. err, 0) end
+            return fn()
+        end,
+        require = function(name)
+            return env.dofile("rom/modules/main/" .. name:gsub("%.", "/") .. ".lua")
+        end
+    }, {__index = process.env})
     if apiName:sub(1, 3) == "cc." then
-        local path = fs.combine("rom/modules/main", apiName:gmatch("%.", "/") .. ".lua")
+        local path = fs.combine("rom/modules/main", apiName:gsub("%.", "/") .. ".lua")
         if not path:match "^/?rom/modules/main/" then error("Invalid module path", 0) end
         return env.dofile(path)
     else
@@ -930,3 +955,5 @@ function syscalls.loadCraftOSAPI(process, thread, apiName)
         return t
     end
 end
+
+mounts[""] = filesystems[args.rootfstype]:new(KERNEL, args.root, {})

@@ -410,7 +410,7 @@ function terminal.write(tty, text)
             elseif c == '\b' then
                 commit(n)
                 if tty.cursor.x == 1 then
-                    if tty.cursor.y > 1 then tty.cursor.x, tty.currso.y = tty.size.width, tty.cursor.y - 1 end
+                    if tty.cursor.y > 1 then tty.cursor.x, tty.cursor.y = tty.size.width, tty.cursor.y - 1 end
                 else tty.cursor.x = tty.cursor.x - 1 end
             elseif c == '\t' then
                 commit(n)
