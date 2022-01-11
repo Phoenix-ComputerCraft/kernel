@@ -792,7 +792,7 @@ local function getMount(process, path)
     if not maxPath then panic("Could not find mount for path " .. path .. ". Where is root?") end
     local parts = split(maxPath, "/\\")
     local p = #fullPath >= #parts + 1 and fs.combine(table.unpack(fullPath, #parts + 1, #fullPath)) or ""
-    syslog.debug(path, #parts, #fullPath, p)
+    --syslog.debug(path, #parts, #fullPath, p)
     return mounts[maxPath], p, maxPath
 end
 

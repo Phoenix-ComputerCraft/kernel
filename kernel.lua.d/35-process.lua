@@ -11,6 +11,7 @@ local process_template = {
     stdout = {}, -- pipe
     stderr = TTY[1],
     cputime = 0.2,
+    systime = 0.1,
     env = {},
     syscallyield = nil,
     eventQueue = {},
@@ -95,7 +96,7 @@ function syscalls.chdir(process, thread, dir)
     local stat = filesystem.stat(process, dir)
     if not stat or stat.type ~= "directory" then return false, "No such file or directory"
     elseif not (stat.permissions[process.user] or stat.worldPermissions).execute then return false, "Permission denied" end
-    process.dir = dir:gsub("^([^/])", "/%1")
+    process.dir = dir:gsub("^([^/])", "/" .. process.dir .. "/%1")
     return true
 end
 
@@ -103,6 +104,7 @@ function syscalls.fork(process, thread, func, name, ...)
     expect(1, func, "function")
     expect(2, name, "string", "nil")
     local id = #processes + 1
+    local p
     processes[id] = {
         id = id,
         name = name or process.name,
@@ -114,6 +116,7 @@ function syscalls.fork(process, thread, func, name, ...)
         stdout = process.stdout,
         stderr = process.stderr,
         cputime = 0,
+        systime = 0,
         syscallyield = nil,
         eventQueue = {},
         signalHandlers = {
@@ -131,9 +134,9 @@ function syscalls.fork(process, thread, func, name, ...)
             end,
             [13] = function() return coroutine.yield("syscall", "exit", 1) end,
             [15] = function() return coroutine.yield("syscall", "exit", 1) end,
-            [19] = function() processes[id].paused = true end,
-            [21] = function() processes[id].paused = true end,
-            [22] = function() processes[id].paused = true end,
+            [19] = function() p.paused = true end,
+            [21] = function() p.paused = true end,
+            [22] = function() p.paused = true end,
         },
         paused = false,
         threads = {
@@ -147,23 +150,37 @@ function syscalls.fork(process, thread, func, name, ...)
             }
         }
     }
+    p = processes[id]
     processes[id].env = mkenv(processes[id])
     setfenv(func, processes[id].env)
-    -- TODO: Decide who gets the TTY here
+    if process.stdin and process.stdin.isTTY then
+        process.stdin.processList[#process.stdin.processList+1] = process.stdin.frontmostProcess
+        process.stdin.frontmostProcess = processes[id]
+    end
+    if process.stdout and process.stdout.isTTY and process.stdout.frontmostProcess ~= processes[id] then
+        process.stdout.processList[#process.stdout.processList+1] = process.stdout.frontmostProcess
+        process.stdout.frontmostProcess = processes[id]
+    end
+    if process.stderr and process.stderr.isTTY and process.stderr.frontmostProcess ~= processes[id] then
+        process.stderr.processList[#process.stderr.processList+1] = process.stderr.frontmostProcess
+        process.stderr.frontmostProcess = processes[id]
+    end
     if args.preemptive then debug.sethook(processes[id].threads[0].coro, preempt_hook, "", args.quantum) end
     return id
 end
 
 function syscalls.exec(process, thread, path, ...)
     expect(1, path, "string")
-    -- TODO: Check execution permissions on the file
     local file, err = filesystem.open(process, path, "rb")
     if not file then
-        file, err = filesystem.open(process, path .. ".lua", "rb")
+        path = path .. ".lua"
+        file, err = filesystem.open(process, path, "rb")
         if not file then error("Could not open file: " .. err, 0) end
     end
     local contents = file.readAll()
     file.close()
+    local stat = filesystem.stat(process, path)
+    if not (stat.permissions[stat.owner] or stat.worldPermissions).execute then error("Could not execute file: Permission denied", 0) end
     if contents:sub(1, 2) == "#!" then
         local command = contents:sub(3, contents:find("\n") - 1)
         local args, i = {}, 0
@@ -171,74 +188,25 @@ function syscalls.exec(process, thread, path, ...)
         for _,v in ipairs{...} do args[i] = v i=i+1 end
         if args[0] == path then error("Recursive path detected while resolving shebang", 0) end
         syscalls.exec(process, thread, args[0], table.unpack(args, 1, i - 1))
-        -- TODO: set the stdin of the process to the file data
-        processes[process.id].name = path
+        local f = filesystem.open(process, path, "rb")
+        process.stdin = {read = function(n) if n then return f.read(n) else return f.readLine() end end}
+        process.name = path
     else
         local func, err = load(contents, "@" .. path, "bt")
         if not func then error("Could not execute file: " .. err, 0) end
-        local id = process.id
-        local p
-        processes[id] = {
-            id = id,
-            name = path,
-            user = process.user,
-            dependents = {},
-            parent = process.parent,
-            env = process.env,
-            dir = process.dir,
-            stdin = process.stdin,
-            stdout = process.stdout,
-            stderr = process.stderr,
-            cputime = 0,
-            syscallyield = nil,
-            eventQueue = {},
-            signalHandlers = {
-                [1] = function() return coroutine.yield("syscall", "exit", 1) end,
-                [2] = function() return coroutine.yield("syscall", "exit", 1) end,
-                [3] = function()
-                    -- TODO: finalize this behavior
-                    coroutine.yield("syscall", "syslog", {level = 4, category = "Application Error"}, debug.traceback("Quit"))
-                    return coroutine.yield("syscall", "exit", 1)
-                end,
-                [6] = function(err)
-                    -- TODO: finalize this behavior
-                    coroutine.yield("syscall", "syslog", {level = 4, category = "Application Error"}, debug.traceback(err or "Aborted"))
-                    return coroutine.yield("syscall", "exit", 1)
-                end,
-                [13] = function() return coroutine.yield("syscall", "exit", 1) end,
-                [15] = function() return coroutine.yield("syscall", "exit", 1) end,
-                [19] = function() p.paused = true end,
-                [21] = function() p.paused = true end,
-                [22] = function() p.paused = true end,
-            },
-            paused = false,
-            threads = {
-                [0] = {
-                    id = 0,
-                    name = "<main thread>",
-                    coro = coroutine.create(func),
-                    status = "starting",
-                    args = table.pack(...),
-                    filter = nil,
-                }
+        process.name = path
+        process.threads = {
+            [0] = {
+                id = 0,
+                name = "<main thread>",
+                coro = coroutine.create(func),
+                status = "starting",
+                args = table.pack(...),
+                filter = nil,
             }
         }
-        p = processes[id]
-        setfenv(func, processes[id].env)
-        if args.preemptive then debug.sethook(processes[id].threads[0].coro, preempt_hook, "", args.quantum) end
-        reap_process(process)
-        if process.stdin and process.stdin.isTTY then
-            process.stdin.processList[#process.stdin.processList+1] = process.stdin.frontmostProcess
-            process.stdin.frontmostProcess = processes[id]
-        end
-        if process.stdout and process.stdout.isTTY and process.stdout.frontmostProcess ~= processes[id] then
-            process.stdout.processList[#process.stdout.processList+1] = process.stdout.frontmostProcess
-            process.stdout.frontmostProcess = processes[id]
-        end
-        if process.stderr and process.stderr.isTTY and process.stderr.frontmostProcess ~= processes[id] then
-            process.stderr.processList[#process.stderr.processList+1] = process.stderr.frontmostProcess
-            process.stderr.frontmostProcess = processes[id]
-        end
+        setfenv(func, process.env)
+        if args.preemptive then debug.sethook(process.threads[0].coro, preempt_hook, "", args.quantum) end
     end
 end
 
@@ -296,6 +264,7 @@ function syscalls.getpinfo(process, thread, pid)
         stdout = stdout,
         stderr = stderr,
         cputime = p.cputime or 0,
+        systime = p.systime or 0,
         threads = threads,
     }
 end

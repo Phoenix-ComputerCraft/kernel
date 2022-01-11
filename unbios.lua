@@ -6,9 +6,11 @@
 -- * string metatable blocking (on old versions of CC)
 -- In addition, if `debug` is not available these things are also irreversibly changed:
 -- * old Lua 5.1 `load` function (for loading from a function)
--- * `loadstring` prefixing
+-- * `loadstring` prefixing (before CC:T 1.96.0)
 -- * `http.request`
 -- * `os.shutdown` and `os.reboot`
+-- * `peripheral`
+-- * `turtle.equip[Left|Right]`
 -- Licensed under the MIT license
 local kernelArgs = table.pack(...)
 local keptAPIs = {bit32 = true, bit = true, ccemux = true, config = true, coroutine = true, debug = true, ffi = true, fs = true, http = true, io = true, jit = true, mounter = true, os = true, periphemu = true, peripheral = true, redstone = true, rs = true, term = true, _HOST = true, _CC_DEFAULT_SETTINGS = true, _CC_DISABLE_LUA51_FEATURES = true, _VERSION = true, assert = true, collectgarbage = true, error = true, gcinfo = true, getfenv = true, getmetatable = true, ipairs = true, loadstring = true, math = true, newproxy = true, next = true, pairs = true, pcall = true, rawequal = true, rawget = true, rawlen = true, rawset = true, select = true, setfenv = true, setmetatable = true, string = true, table = true, tonumber = true, tostring = true, type = true, unpack = true, xpcall = true, turtle = true, pocket = true, commands = true, _G = true}
@@ -22,6 +24,8 @@ end
 _G.term = native
 _G.http.checkURL = _G.http.checkURLAsync
 _G.http.websocket = _G.http.websocketAsync
+if _G.commands then _G.commands = _G.commands.native end
+if _G.turtle then _G.turtle.native, _G.turtle.craft = nil end
 local delete = {os = {"version", "pullEventRaw", "pullEvent", "run", "loadAPI", "unloadAPI", "sleep"}, http = {"get", "post", "put", "delete", "patch", "options", "head", "trace", "listen", "checkURLAsync", "websocketAsync"}, fs = {"complete", "isDriveRoot"}}
 for k,v in pairs(delete) do for _,a in ipairs(v) do _G[k][a] = nil end end
 -- Set up TLCO
@@ -98,6 +102,10 @@ if debug then
     restoreValue(http, "request", "nativeHTTPRequest", 3)
     restoreValue(os, "shutdown", "nativeShutdown", 1)
     restoreValue(os, "reboot", "nativeReboot", 1)
+    if turtle then
+        restoreValue(turtle, "equipLeft", "v", 1)
+        restoreValue(turtle, "equipRight", "v", 1)
+    end
     do
         local i, key, value = 1, debug.getupvalue(peripheral.isPresent, 2)
         while key ~= "native" and key ~= nil do

@@ -266,7 +266,9 @@ function executeThread(process, thread, ev, dead, allWaiting)
             local oldAllWaiting = allWaiting
             allWaiting = false
             if params[3] and syscalls[params[3]] then
-                thread.syscall_return = table.pack(pcall(syscalls[params[3]], process, thread, table.unpack(params, 4, params.n)))
+                local start = os.epoch "utc"
+                thread.syscall_return = table.pack(xpcall(syscalls[params[3]], debug.traceback, process, thread, table.unpack(params, 4, params.n)))
+                process.systime = process.systime + (os.epoch "utc" - start) / 1000
                 if not thread.syscall_return[1] and type(thread.syscall_return[2]) == "string" then
                     syslog.log({level = 0, category = "Syscall Failure", process = 0}, thread.syscall_return[2])
                     thread.syscall_return[2] = thread.syscall_return[2]:gsub("kernel:%d+: ", "")
@@ -309,7 +311,7 @@ function userModeCallback(process, func, ...)
         args = table.pack(...),
         filter = nil,
     }
-    setfenv(func, process.env)
+    pcall(setfenv, func, process.env)
     local dead = false
     while not dead do
         dead = executeThread(process, thread, empty_packed_table, true, false)

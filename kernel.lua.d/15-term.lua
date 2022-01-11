@@ -108,6 +108,21 @@ eventHooks.key[#eventHooks.key+1] = function(ev)
         -- TODO: fill in other cool keys
         end
     end
+    if keysHeld.ctrl and keysHeld.alt and not keysHeld.shift then
+        local changed = true
+        if ev[2] == keys.one then currentTTY = TTY[1]
+        elseif ev[2] == keys.two then currentTTY = TTY[2]
+        elseif ev[2] == keys.three then currentTTY = TTY[3]
+        elseif ev[2] == keys.four then currentTTY = TTY[4]
+        elseif ev[2] == keys.five then currentTTY = TTY[5]
+        elseif ev[2] == keys.six then currentTTY = TTY[6]
+        elseif ev[2] == keys.seven then currentTTY = TTY[7]
+        elseif ev[2] == keys.eight then currentTTY = TTY[8]
+        elseif ev[2] == keys.left then for i = 1, 8 do if currentTTY == TTY[i] then currentTTY = TTY[(i+7)%8] break end end
+        elseif ev[2] == keys.right then for i = 1, 8 do if currentTTY == TTY[i] then currentTTY = TTY[(i+1)%8] break end end
+        else changed = false end
+        if changed then terminal.redraw(currentTTY, true) end
+    end
 end
 eventHooks.key_up[#eventHooks.key_up+1] = function(ev)
     if ev[2] == keys.leftCtrl or ev[2] == keys.rightCtrl then keysHeld.ctrl = false
@@ -527,7 +542,7 @@ end
 
 function syscalls.write(process, thread, ...)
     if not process.stdout then return end
-    if process ~= process.stdout.frontmostProcess then
+    if process.stdout.isTTY and process ~= process.stdout.frontmostProcess then
         syscalls.kill(KERNEL, nil, process.id, 22)
         if process.paused then return kSyscallYield, "write" end
     end
@@ -544,7 +559,7 @@ end
 
 function syscalls.writeerr(process, thread, ...)
     if not process.stderr then return end
-    if process ~= process.stderr.frontmostProcess then
+    if process.stderr.isTTY and process ~= process.stderr.frontmostProcess then
         syscalls.kill(KERNEL, nil, process.id, 22)
         if process.paused then return kSyscallYield, "writeerr" end
     end
@@ -560,6 +575,7 @@ function syscalls.writeerr(process, thread, ...)
 end
 
 function syscalls.read(process, thread, n)
+    expect(1, n, "number")
     if process.stdin then
         if process.stdin.isTTY and process ~= process.stdin.frontmostProcess then
             syscalls.kill(KERNEL, nil, process.id, 21)
@@ -575,7 +591,10 @@ function syscalls.read(process, thread, n)
                 return nil
             end
             if process.stdin.isTTY and not process.stdin.flags.delay then return nil end
-            if process.stdin.read then process.stdin.buffer = process.stdin.buffer .. process.stdin.read(n)
+            if process.stdin.read then
+                local s = process.stdin.read(n - #process.stdin.buffer)
+                if not s then return nil end
+                process.stdin.buffer = process.stdin.buffer .. s
             else return kSyscallYield, "read", n end
         end
         local s = process.stdin.buffer:sub(1, n - 1)
@@ -600,7 +619,10 @@ function syscalls.readline(process, thread)
                 return nil
             end
             if process.stdin.isTTY and not process.stdin.flags.delay then return nil end
-            if process.stdin.read then process.stdin.buffer = process.stdin.buffer .. process.stdin.read()
+            if process.stdin.read then
+                local s = process.stdin.read()
+                if not s then return nil end
+                process.stdin.buffer = process.stdin.buffer .. s
             else return kSyscallYield, "readline" end
         end
         local n = process.stdin.buffer:find("\n")
@@ -790,31 +812,33 @@ function syscalls.openterm(process, thread)
 
     function win.getTextColor()
         if not win then error("terminal is already closed", 2) end
-        return 2^tonumber(buffer.colors.fg)
+        return tonumber(buffer.colors.fg)
     end
 
     function win.setTextColor(color)
         if not win then error("terminal is already closed", 2) end
         expect(1, color, "number")
-        buffer.colors.fg = ("%x"):format(math.floor(math.log(color, 2)) % 16)
+        expect.range(color, 0, 15)
+        buffer.colors.fg = ("%x"):format(color)
     end
 
     function win.getBackgroundColor()
         if not win then error("terminal is already closed", 2) end
-        return 2^tonumber(buffer.colors.bg)
+        return tonumber(buffer.colors.bg)
     end
 
     function win.setBackgroundColor(color)
         if not win then error("terminal is already closed", 2) end
         expect(1, color, "number")
-        buffer.colors.bg = ("%x"):format(math.floor(math.log(color, 2)) % 16)
+        expect.range(color, 0, 15)
+        buffer.colors.bg = ("%x"):format(color)
     end
 
     function win.getPaletteColor(color)
         if not win then error("terminal is already closed", 2) end
         expect(1, color, "number")
-        color = bit32.band(math.floor(math.log(color, 2)), 0x0F) % 16
-        return table.unpack(buffer.palette[color])
+        expect.range(color, 0, 15)
+        return table.unpack(buffer.palette[math.floor(color)])
     end
 
     function win.setPaletteColor(color, r, g, b)
@@ -824,12 +848,12 @@ function syscalls.openterm(process, thread)
         if g == nil and b == nil then r, g, b = bit32.band(bit32.rshift(r, 16), 0xFF) / 255, bit32.band(bit32.rshift(r, 8), 0xFF) / 255, bit32.band(r, 0xFF) / 255 end
         expect(3, g, "number")
         expect(4, b, "number")
+        expect.range(color, 0, 15)
         if r < 0 or r > 1 then error("bad argument #2 (value out of range)", 2) end
         if g < 0 or g > 1 then error("bad argument #3 (value out of range)", 2) end
         if b < 0 or b > 1 then error("bad argument #4 (value out of range)", 2) end
-        color = bit32.band(math.floor(math.log(color, 2)), 0x0F) % 16
-        buffer.palette[color] = {r, g, b}
-        buffer.dirtyPalette[color] = true
+        buffer.palette[math.floor(color)] = {r, g, b}
+        buffer.dirtyPalette[math.floor(color)] = true
         --redraw(process.stdout)
     end
 
@@ -1115,4 +1139,13 @@ function syscalls.stderr(process, thread, handle)
         end
         process.stderr = handle
     end
+end
+
+function syscalls.istty(process, thread)
+    return process.stdin and process.stdin.isTTY, process.stdout and process.stdout.isTTY
+end
+
+function syscalls.termsize(process, thread)
+    if not process.stdout or not process.stdout.isTTY then return nil, nil end
+    return process.stdout.size.width, process.stdout.size.height
 end

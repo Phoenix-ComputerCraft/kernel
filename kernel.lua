@@ -4,6 +4,9 @@
 -- This is a PRE-RELEASE BUILD! Redistribution of this file is not permitted.
 -- See the Phoenix EULA (https://github.com/Phoenix-ComputerCraft/kernel/blob/master/LICENSE.md) for more information.
 
+PHOENIX_VERSION = "0.0.1"
+PHOENIX_BUILD = "PRERELEASE NONFREE"
+
 systemStartTime = os.epoch "utc"
 
 args = {
@@ -11,7 +14,7 @@ args = {
     root = "/root",
     rootfstype = "craftos",
     preemptive = true,
-    quantum = 2000,
+    quantum = 2000000,
     splitkernpath = "/boot/kernel.lua.d",
     loglevel = 1,
     console = "tty1"

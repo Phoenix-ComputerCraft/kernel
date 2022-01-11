@@ -65,6 +65,24 @@ function createLuaLib(process)
     G.math = deepcopy(math)
     G.bit32 = deepcopy(bit32)
 
+    -- The default math.random uses a global seed which cannot be shared between processes,
+    -- so we need to implement our own randomizer.
+
+    local random_state = 0
+    function G.math.random(min, max)
+        expect(1, min, "number", "nil")
+        expect(2, max, "number", "nil")
+        random_state = (1103515245 * random_state + 12345) % 0x80000000
+        local rand = random_state / 0x7FFFFFFF
+        if max then return math.floor(rand * (math.floor(max) - math.floor(min))) + min
+        elseif min then return math.floor(rand * math.floor(max))
+        else return rand end
+    end
+    function G.math.randomseed(seed)
+        expect(1, seed, "number")
+        random_state = math.floor(seed) % 0x80000000
+    end
+
     local oldcreate = coroutine.create
     local sethook = debug.sethook
     function G.coroutine.create(func)
@@ -75,7 +93,7 @@ function createLuaLib(process)
     end
 
     local stdin_buffer = ""
-    local io_stdin = {
+    local io_stdin = setmetatable({
         close = function() end,
         lines = function(self, ...)
             local args = table.pack(...)
@@ -116,8 +134,8 @@ function createLuaLib(process)
         end,
         seek = function() return nil, "Cannot seek default file" end,
         setvbuf = function() end
-    }
-    local io_stdout = {
+    }, {__name = "FILE*"})
+    local io_stdout = setmetatable({
         close = function() end,
         flush = function() end,
         seek = function() return nil, "Cannot seek default file" end,
@@ -126,8 +144,8 @@ function createLuaLib(process)
             do_syscall("write", ...)
             return self
         end
-    }
-    local io_stderr = {
+    }, {__name = "FILE*"})
+    local io_stderr = setmetatable({
         close = function() end,
         flush = function() end,
         seek = function() return nil, "Cannot seek default file" end,
@@ -136,7 +154,7 @@ function createLuaLib(process)
             do_syscall("writeerr", ...)
             return self
         end
-    }
+    }, {__name = "FILE*"})
     local io_input, io_output = io_stdin, io_stdout
 
     local io_infile = {
@@ -239,8 +257,118 @@ function createLuaLib(process)
             elseif type(file) == "table" and getmetatable(file) and getmetatable(file).__name == "FILE*" then io_output = file
             else error("bad argument #1 (expected string or FILE*, got " .. type(file) .. ")", 2) end
         end,
+        -- Extra ability: if mode == "rw", then returns two file handles: first is "r" (stdin), second is "w" (stdout)
         popen = function(path, mode)
-            -- TODO
+            expect(1, path, "string")
+            mode = expect(2, mode, "string", "nil") or "r"
+            if mode ~= "r" and mode ~= "w" and mode ~= "rw" then error("bad argument #2 (invalid mode)", 2) end
+            if mode == "rw" then
+                local ibuffer, obuffer = "", ""
+                local pid
+                local irhandle = {read = function(n)
+                    if ibuffer == "" then return nil
+                    elseif n then
+                        local s = ibuffer:sub(1, n)
+                        ibuffer = ibuffer:sub(n + 1)
+                        return s
+                    else
+                        local s, e = ibuffer:match "([^\n]*)\n*()"
+                        ibuffer = ibuffer:sub(e)
+                        return s
+                    end
+                end}
+                local iwhandle = {
+                    write = function(s) ibuffer = ibuffer .. s end,
+                    flush = function() end,
+                    close = function()
+                        local info = do_syscall("getpinfo", pid)
+                        if not info then return end
+                        repeat local ev, param = coroutine.yield() until ev == "process_complete" and param.pid == pid
+                    end
+                }
+                local orhandle = {
+                    read = function(n)
+                        if obuffer == "" then return nil
+                        elseif n then
+                            local s = obuffer:sub(1, n)
+                            obuffer = obuffer:sub(n + 1)
+                            return s
+                        else
+                            local s, e = obuffer:match "([^\n]*)\n*()"
+                            obuffer = obuffer:sub(e)
+                            return s
+                        end
+                    end,
+                    readLine = function()
+                        local s, e = obuffer:match "([^\n]*)\n*()"
+                        obuffer = obuffer:sub(e)
+                        return s
+                    end,
+                    readAll = function()
+                        local s = obuffer
+                        obuffer = ""
+                        return s
+                    end,
+                    close = function()
+                        local info = do_syscall("getpinfo", pid)
+                        if not info then return end
+                        repeat local ev, param = coroutine.yield() until ev == "process_complete" and param.pid == pid
+                    end
+                }
+                local owhandle = {write = function(s) obuffer = obuffer .. s end}
+                pid = do_syscall("fork", function()
+                    do_syscall("stdin", irhandle)
+                    do_syscall("stdout", owhandle)
+                    do_syscall("exec", "/bin/sh", "-c", path)
+                end)
+                return setmetatable({_file = orhandle}, {__index = io_infile, __name = "FILE*"}), setmetatable({_file = iwhandle}, {__index = io_outfile, __name = "FILE*"})
+            else
+                local buffer = ""
+                local pid
+                local rhandle = {
+                    read = function(n)
+                        if buffer == "" then return nil
+                        elseif n then
+                            local s = buffer:sub(1, n)
+                            buffer = buffer:sub(n + 1)
+                            return s
+                        else
+                            local s, e = buffer:match "([^\n]*)\n*()"
+                            buffer = buffer:sub(e)
+                            return s
+                        end
+                    end,
+                    readLine = function()
+                        local s, e = buffer:match "([^\n]*)\n*()"
+                        buffer = buffer:sub(e)
+                        return s
+                    end,
+                    readAll = function()
+                        local s = buffer
+                        buffer = ""
+                        return s
+                    end,
+                    close = function()
+                        local info = do_syscall("getpinfo", pid)
+                        if not info then return end
+                        repeat local ev, param = coroutine.yield() until ev == "process_complete" and param.pid == pid
+                    end
+                }
+                local whandle = {
+                    write = function(s) buffer = buffer .. s end,
+                    flush = function() end,
+                    close = function()
+                        local info = do_syscall("getpinfo", pid)
+                        if not info then return end
+                        repeat local ev, param = coroutine.yield() until ev == "process_complete" and param.pid == pid
+                    end
+                }
+                pid = do_syscall("fork", function()
+                    do_syscall(mode == "r" and "stdout" or "stdin", mode == "r" and whandle or rhandle)
+                    do_syscall("exec", "/bin/sh", "-c", path)
+                end)
+                return mode == "r" and setmetatable({_file = rhandle}, {__index = io_infile, __name = "FILE*"}) or setmetatable({_file = whandle}, {__index = io_outfile, __name = "FILE*"})
+            end
         end,
         read = function(...)
             return io_input:read(...)
@@ -269,9 +397,7 @@ function createLuaLib(process)
         date = os.date,
         difftime = function(a, b) return a - b end,
         execute = function(path)
-            -- TODO: make `wait` work
-            local pid = do_syscall("exec", "/bin/sh", "-c", path)
-            return do_syscall("wait", pid)
+            do_syscall("exec", "/bin/sh", "-c", path)
         end,
         exit = function(code)
             do_syscall("exit", code)

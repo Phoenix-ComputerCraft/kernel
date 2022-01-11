@@ -18,7 +18,7 @@ local loglevels = {
     "Panic"
 }
 
-local logcolors = {[0] = '\27[90m', '\27[97m', '\27[37m', '\27[93m', '\27[31m', '\27[96m', '\27[33m'}
+local logcolors = {[0] = '\27[90m', '\27[97m', '\27[37m', '\27[93m', '\27[31m', '\27[95m', '\27[96m'}
 
 local function concat(t, sep, i, j)
     if i == j then return tostring(t[i])

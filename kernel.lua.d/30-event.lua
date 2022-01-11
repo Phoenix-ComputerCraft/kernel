@@ -7,13 +7,13 @@ function syscalls.kill(process, thread, pid, signal)
     local target = processes[pid]
     if not target then error("No such process", 2) end
     if process.user ~= "root" and process.user ~= target.user then error("Permission denied", 2) end
-    syslog.debug("Sending signal", signal, "to PID", pid)
+    --syslog.debug("Sending signal", signal, "to PID", pid)
     if signal == 9 then
         reap_process(target)
         if processes[target.parent] then syscalls.queueEvent(processes[target.parent], nil, "process_complete", {id = pid, result = 9}) end
         processes[pid] = nil
     elseif target.signalHandlers[signal] then
-        userModeCallback(target, target.signalHandlers[signal])
+        userModeCallback(target, target.signalHandlers[signal], signal)
     else
         syscalls.queueEvent(target, nil, "signal", {signal = signal})
     end
@@ -38,7 +38,7 @@ function syscalls.sendEvent(process, thread, pid, name, params)
     if not target then error("No such process", 2) end
     -- TODO: figure out filtering
     target.eventQueue[#target.eventQueue+1] = {"remote_event", {type = name, sender = process.id, data = params}}
-    return true
+    return true -- TODO: ?
 end
 
 function syscalls.timer(process, thread, timeout)
@@ -48,6 +48,7 @@ function syscalls.timer(process, thread, timeout)
     return bit32.band(tm, 0x7FFFFFFF)
 end
 
+-- TODO: Determine the type of time for the alarm + how to expose it to userland
 function syscalls.alarm(process, thread, timeout)
     expect(1, timeout, "number")
     local tm = os.setAlarm(timeout)
