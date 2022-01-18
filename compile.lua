@@ -24,7 +24,7 @@ end
 
 file, err = io.open(args[2], "w")
 if not file then error("Could not open output: " .. err) end
-file:write(kernel:sub(1, kernel:find("-- ==== LOADER ====", 1, true) - 1))
+file:write(kernel:sub(1, kernel:find("-- ==== LOADER ====", 1, true) - 1):gsub("%$BUILD_DATE%$", os.date()))
 file:write(parts)
 file:write(kernel:sub(select(2, kernel:find("-- == END LOADER ==", 1, true)) + 1))
 file:close()

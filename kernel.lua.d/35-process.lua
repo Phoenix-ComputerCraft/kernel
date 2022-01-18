@@ -58,6 +58,7 @@ function reap_process(process)
     for _, v in ipairs(process.dependents) do v:gc() end
     if process.stdin and process.stdin.isTTY and process.stdin.frontmostProcess == process then
         process.stdin.frontmostProcess = table.remove(process.stdin.processList)
+        process.stdin.preBuffer = ""
     end
     if process.stdout and process.stdout.isTTY and process.stdout.frontmostProcess == process then
         process.stdout.frontmostProcess = table.remove(process.stdout.processList)
@@ -156,6 +157,7 @@ function syscalls.fork(process, thread, func, name, ...)
     if process.stdin and process.stdin.isTTY then
         process.stdin.processList[#process.stdin.processList+1] = process.stdin.frontmostProcess
         process.stdin.frontmostProcess = processes[id]
+        process.stdin.preBuffer = ""
     end
     if process.stdout and process.stdout.isTTY and process.stdout.frontmostProcess ~= processes[id] then
         process.stdout.processList[#process.stdout.processList+1] = process.stdout.frontmostProcess

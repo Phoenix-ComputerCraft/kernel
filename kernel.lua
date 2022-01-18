@@ -1,11 +1,11 @@
--- Phoenix Kernel v0.1
+-- Phoenix Kernel v0.0.1
 --
--- Copyright (c) 2021 JackMacWindows. All rights reserved.
+-- Copyright (c) 2021-2022 JackMacWindows. All rights reserved.
 -- This is a PRE-RELEASE BUILD! Redistribution of this file is not permitted.
 -- See the Phoenix EULA (https://github.com/Phoenix-ComputerCraft/kernel/blob/master/LICENSE.md) for more information.
 
 PHOENIX_VERSION = "0.0.1"
-PHOENIX_BUILD = "PRERELEASE NONFREE"
+PHOENIX_BUILD = "PRERELEASE NONFREE $BUILD_DATE$"
 
 systemStartTime = os.epoch "utc"
 
@@ -51,7 +51,7 @@ for _, v in ipairs(fs.list(fs.combine(args.root, args.splitkernpath))) do
     local fn, err = (loadstring or load)(file.readAll(), --[["@" .. fs.combine(args.root, args.splitkernpath, v)]] "=kernel:" .. v)
     file.close()
     if not fn then panic("Could not load kernel part " .. v .. ": " .. err) end
-    fn()
+    fn(...)
 end
 
 -- == END LOADER ==

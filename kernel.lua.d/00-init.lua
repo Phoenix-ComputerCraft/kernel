@@ -331,6 +331,7 @@ end
 
 if jit and args.preemptive then panic("Phoenix does not support preemption when running under LuaJIT. Please set preemptive to false in the kernel arguments.") end
 if not debug and args.preemptive then panic("Phoenix does not support preemption without the debug API. Please set preemptive to false in the kernel arguments.") end
+if args.preemptive then PHOENIX_BUILD = PHOENIX_BUILD .. " PREEMPT" end
 if not getfenv then
     if not debug then panic("Phoenix requires the debug API when running under Lua 5.2 and later.") end
     -- getfenv/setfenv replacements from https://leafo.net/guides/setfenv-in-lua52-and-above.html

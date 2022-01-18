@@ -7,11 +7,11 @@ This End-User License Agreement (hereinafter, "Agreement") creates a legally bin
 This license governs the use of all software products as part of the Phoenix operating system (hereinafter, "Software"), specifically:
 
 - "pxboot" bootloader (excluding "UnBIOS")
-- Phoenix kernel
+- "Phoenix" kernel
 - "startd" initialization system
 - "libsystem" library
 - "baseutils" programs (excluding "cash")
-- "CCKit" graphical library
+- "coresvc" programs
 - "PhoenixWM" window manager
 
 By accessing, downloading, installing, or otherwise using our Software in any way, you agree to be bound by this Agreement in its entirety. If you do not agree, you must cease use of the Software immediately.

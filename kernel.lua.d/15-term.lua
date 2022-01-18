@@ -646,7 +646,7 @@ function syscalls.termctl(process, thread, flags)
         expect.field(flags, "keypad", "boolean", "nil")
         expect.field(flags, "nlcr", "boolean", "nil")
         expect.field(flags, "raw", "boolean", "nil")
-        for k, v in pairs(flags) do if process.stdout.flags[k] then process.stdout.flags[k] = v end end
+        for k, v in pairs(flags) do if process.stdout.flags[k] ~= nil then process.stdout.flags[k] = v end end
     end
     local t = deepcopy(process.stdout.flags)
     t.hasgfx = term.getGraphicsMode ~= nil
@@ -1061,6 +1061,10 @@ end
 
 function syscalls.stdin(process, thread, handle)
     expect(1, handle, "number", "table", "nil")
+    if process.stdin and process.stdin.isTTY and process.stdin.frontmostProcess == process then
+        process.stdin.frontmostProcess = table.remove(process.stdin.processList)
+        process.stdin.preBuffer = ""
+    end
     if type(handle) == "number" then process.stdin = TTY[handle]
     elseif handle == nil then process.stdin = nil
     else
@@ -1071,6 +1075,7 @@ function syscalls.stdin(process, thread, handle)
                 process.stdin.frontmostProcess = table.remove(process.stdin.processList)
                 handle.processList[#handle.processList+1] = handle.frontmostProcess
                 handle.frontmostProcess = process
+                handle.preBuffer = ""
             end
         else
             expect.field(handle, "read", "function")
@@ -1089,6 +1094,9 @@ end
 
 function syscalls.stdout(process, thread, handle)
     expect(1, handle, "number", "table", "nil")
+    if process.stdout and process.stdout.isTTY and process.stdout.frontmostProcess == process then
+        process.stdout.frontmostProcess = table.remove(process.stdout.processList)
+    end
     if type(handle) == "number" then process.stdout = TTY[handle]
     elseif handle == nil then process.stdout = nil
     else
@@ -1116,6 +1124,9 @@ end
 
 function syscalls.stderr(process, thread, handle)
     expect(1, handle, "number", "table", "nil")
+    if process.stderr and process.stdout.isTTY and process.stdout.frontmostProcess == process then
+        process.stdout.frontmostProcess = table.remove(process.stdout.processList)
+    end
     if type(handle) == "number" then process.stderr = TTY[handle]
     elseif handle == nil then process.stderr = nil
     else

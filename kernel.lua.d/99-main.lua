@@ -115,6 +115,7 @@ while processes[init_pid] do
             for i = 2, #eventParameterMap[name] + 1 do
                 params[eventParameterMap[name][i-1]] = ev[i]
             end
+            if name == "key" or name == "key_up" then params.keycode = keymap[params.keycode] end
             if ttyEvents[name] and currentTTY.frontmostProcess then
                 currentTTY.frontmostProcess.eventQueue[#currentTTY.frontmostProcess.eventQueue+1] = {name, params}
                 pushedEvent = true
