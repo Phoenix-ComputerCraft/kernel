@@ -445,6 +445,8 @@ function createLuaLib(process)
 
     createRequire(process, G)
 
+    G.periphemu = periphemu -- TODO: TEMPORARY
+
     -- Protect all global functions from debug
     for k,v in pairs(G) do
         if type(v) == "function" then

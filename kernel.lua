@@ -40,6 +40,7 @@ terminal = {}
 user = {}
 syslog = {}
 modules = {}
+hardware = {}
 
 eventHooks = {}
 

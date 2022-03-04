@@ -1,3 +1,5 @@
+-- The device tree is initialized only once all kernel modules are fully loaded to avoid losses
+hardware.register(deviceTreeRoot, rootDriver)
 local empty_packed_table = {n = 0}
 local init_process = processes[syscalls.fork(KERNEL, nil, function() end, "init")]
 local init_pid = init_process.id
