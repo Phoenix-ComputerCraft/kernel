@@ -1,6 +1,4 @@
--- TODO: implement graphics compatibility
-
-local function makeTTY(width, height)
+function terminal.makeTTY(term, width, height)
     local retval = {
         isTTY = true,
         flags = {
@@ -27,6 +25,7 @@ local function makeTTY(width, height)
         frontmostProcess = nil,
         processList = {},
         eof = false,
+        term = term,
     }
     for y = 1, height do
         retval[y] = {(' '):rep(width), ('0'):rep(width), ('f'):rep(width)}
@@ -42,18 +41,18 @@ end
 do
     local term_width, term_height = term.getSize()
     TTY = {
-        makeTTY(term_width, term_height),
-        makeTTY(term_width, term_height),
-        makeTTY(term_width, term_height),
-        makeTTY(term_width, term_height),
-        makeTTY(term_width, term_height),
-        makeTTY(term_width, term_height),
-        makeTTY(term_width, term_height),
-        makeTTY(term_width, term_height)
+        terminal.makeTTY(term, term_width, term_height),
+        terminal.makeTTY(term, term_width, term_height),
+        terminal.makeTTY(term, term_width, term_height),
+        terminal.makeTTY(term, term_width, term_height),
+        terminal.makeTTY(term, term_width, term_height),
+        terminal.makeTTY(term, term_width, term_height),
+        terminal.makeTTY(term, term_width, term_height),
+        terminal.makeTTY(term, term_width, term_height)
     }
 end
 currentTTY = TTY[1]
-local userTTYs = {}
+terminal.userTTYs = {}
 
 do
     local n = args.console:match "^tty(%d+)$"
@@ -132,6 +131,7 @@ end
 
 function terminal.redraw(tty, full)
     if currentTTY ~= tty then return end
+    local term = tty.term
     local buffer = tty
     if tty.isLocked then
         if tty.isGraphics then
@@ -175,7 +175,7 @@ function terminal.redraw(tty, full)
             if not buffer[y] then error(debug.traceback(y)) end
             term.setCursorPos(1, y)
             if #buffer[y][1] ~= #buffer[y][2] or #buffer[y][2] ~= #buffer[y][3] then
-                syslog.log({level = 5}, "Bug in text writer! Inequal lengths: " .. #buffer[y][1] .. ", " .. #buffer[y][2] .. ", " .. #buffer[y][3])
+                syslog.log({level = "critical"}, "Bug in text writer! Inequal lengths: " .. #buffer[y][1] .. ", " .. #buffer[y][2] .. ", " .. #buffer[y][3])
                 error("Invalid lengths")
             end
             term.blit(buffer[y][1], buffer[y][2], buffer[y][3])
@@ -649,7 +649,7 @@ function syscalls.termctl(process, thread, flags)
         for k, v in pairs(flags) do if process.stdout.flags[k] ~= nil then process.stdout.flags[k] = v end end
     end
     local t = deepcopy(process.stdout.flags)
-    t.hasgfx = term.getGraphicsMode ~= nil
+    t.hasgfx = process.stdout.term.getGraphicsMode ~= nil
     return t
 end
 
@@ -1052,10 +1052,10 @@ function syscalls.mktty(process, thread, width, height)
     expect(2, height, "number")
     expect.range(width, 1)
     expect.range(height, 1)
-    local tty = makeTTY(width, height)
+    local tty = terminal.makeTTY(term, width, height)
     local retval = setmetatable({}, {__index = tty, __metatable = {}})
-    userTTYs[retval] = tty
-    process.dependents[#process.dependents+1] = {gc = function() userTTYs[retval] = nil end}
+    terminal.userTTYs[retval] = tty
+    process.dependents[#process.dependents+1] = {gc = function() terminal.userTTYs[retval] = nil end}
     return retval
 end
 
@@ -1069,7 +1069,7 @@ function syscalls.stdin(process, thread, handle)
     elseif handle == nil then process.stdin = nil
     else
         if handle.isTTY then
-            handle = userTTYs[handle]
+            handle = terminal.userTTYs[handle]
             if not handle then error("bad argument #1 (invalid TTY)", 2) end
             if process.stdin.frontmostProcess ~= process then
                 process.stdin.frontmostProcess = table.remove(process.stdin.processList)
@@ -1101,7 +1101,7 @@ function syscalls.stdout(process, thread, handle)
     elseif handle == nil then process.stdout = nil
     else
         if handle.isTTY then
-            handle = userTTYs[handle]
+            handle = terminal.userTTYs[handle]
             if not handle then error("bad argument #1 (invalid TTY)", 2) end
             if process.stdout.frontmostProcess ~= process then
                 process.stdout.frontmostProcess = table.remove(process.stdout.processList)
@@ -1131,7 +1131,7 @@ function syscalls.stderr(process, thread, handle)
     elseif handle == nil then process.stderr = nil
     else
         if handle.isTTY then
-            handle = userTTYs[handle]
+            handle = terminal.userTTYs[handle]
             if not handle then error("bad argument #1 (invalid TTY)", 2) end
             if process.stderr.frontmostProcess ~= process then
                 process.stderr.frontmostProcess = table.remove(process.stderr.processList)

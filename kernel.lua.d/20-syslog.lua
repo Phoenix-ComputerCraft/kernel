@@ -18,6 +18,9 @@ local loglevels = {
     "Panic"
 }
 
+local lognames = {}
+for i = 0, #loglevels do lognames[loglevels[i]:lower()] = i end
+
 local logcolors = {[0] = '\27[90m', '\27[97m', '\27[37m', '\27[93m', '\27[31m', '\27[95m', '\27[96m'}
 
 local function concat(t, sep, i, j)
@@ -30,12 +33,15 @@ function syscalls.syslog(process, thread, options, ...)
     if type(options) == "table" then
         expect.field(options, "name", "string", "nil")
         expect.field(options, "category", "string", "nil")
-        expect.field(options, "level", "number", "nil")
+        expect.field(options, "level", "number", "string", "nil")
         expect.field(options, "time", "number", "nil")
         expect.field(options, "process", "number", "nil")
         expect.field(options, "thread", "number", "nil")
         expect.field(options, "module", "string", "nil")
-        if options.level and (options.level < 0 or options.level > #loglevels) then error("bad field 'level' (level out of range)", 0) end
+        if type(options.level) == "string" then
+            options.level = lognames[options.level:lower()]
+            if not options.level then error("bad field 'level' (invalid name)", 0) end
+        elseif options.level and (options.level < 0 or options.level > #loglevels) then error("bad field 'level' (level out of range)", 0) end
         options.name = options.name or "default"
         options.process = options.process or process.id
         options.thread = options.thread or (thread and thread.id)
@@ -262,18 +268,18 @@ function syslog.log(options, ...)
 end
 
 function syslog.debug(...)
-    return pcall(syscalls.syslog, KERNEL, nil, {level = 0, process = 0}, ...)
+    return pcall(syscalls.syslog, KERNEL, nil, {level = "debug", process = 0}, ...)
 end
 
 local oldpanic = panic
 -- This function can be called either standalone or from within xpcall.
 function panic(message)
-    syslog.log({level = 6}, "Kernel panic:", message)
+    syslog.log({level = "panic"}, "Kernel panic:", message)
     if debug then
         local traceback = debug.traceback(nil, 2)
-        syslog.log({level = 6}, traceback)
+        syslog.log({level = "panic"}, traceback)
     end
-    syslog.log({level = 6}, "We are hanging here...")
+    syslog.log({level = "panic"}, "We are hanging here...")
     term.setCursorBlink(false)
     while true do coroutine.yield() end
 end

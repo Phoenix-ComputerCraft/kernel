@@ -18,9 +18,9 @@ function syscalls.loadmodule(process, thread, path)
         if fn then
             local ok, res = pcall(fn, path)
             if ok then modules[name] = res or true
-            else syslog.log({level = 4}, "Kernel module " .. name .. " threw an error:", res) end
-        else syslog.log({level = 4}, "Could not load " .. name .. ":", err) end
-    else syslog.log({level = 4}, "Could not open " .. path .. ":", err) end
+            else syslog.log({level = "error"}, "Kernel module " .. name .. " threw an error:", res) end
+        else syslog.log({level = "error"}, "Could not load " .. name .. ":", err) end
+    else syslog.log({level = "error"}, "Could not open " .. path .. ":", err) end
 end
 
 -- This call doesn't really do much if the module doesn't use the modules table.
@@ -46,4 +46,4 @@ if ok then
     for _, v in ipairs(modlist) do
         syscalls.loadmodule(KERNEL, nil, filesystem.combine("/lib/modules", v))
     end
-else syslog.log({level = 2}, "Could not open /lib/modules:", modlist) end
+else syslog.log({level = "notice"}, "Could not open /lib/modules:", modlist) end

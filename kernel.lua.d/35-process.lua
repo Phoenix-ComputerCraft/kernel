@@ -125,12 +125,12 @@ function syscalls.fork(process, thread, func, name, ...)
             [2] = function() return coroutine.yield("syscall", "exit", 1) end,
             [3] = function()
                 -- TODO: finalize this behavior
-                coroutine.yield("syscall", "syslog", {level = 4, category = "Application Error"}, debug.traceback("Quit"))
+                coroutine.yield("syscall", "syslog", {level = "error", category = "Application Error"}, debug.traceback("Quit"))
                 return coroutine.yield("syscall", "exit", 1)
             end,
             [6] = function(err)
                 -- TODO: finalize this behavior
-                coroutine.yield("syscall", "syslog", {level = 4, category = "Application Error"}, debug.traceback(err or "Aborted"))
+                coroutine.yield("syscall", "syslog", {level = "error", category = "Application Error"}, debug.traceback(err or "Aborted"))
                 return coroutine.yield("syscall", "exit", 1)
             end,
             [13] = function() return coroutine.yield("syscall", "exit", 1) end,

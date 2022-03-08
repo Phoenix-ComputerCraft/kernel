@@ -8,12 +8,12 @@ if args.init then
     init_ok, init_err = pcall(syscalls.exec, init_process, nil, args.init)
 end
 if not init_ok then
-    syslog.log({level = 4, process = 0}, "Could not load init:", init_err)
+    syslog.log({level = "error", process = 0}, "Could not load init:", init_err)
     syslog.log("Could not find provided init, trying default locations")
     for _,v in ipairs{"/sbin/init", "/etc/init", "/bin/init", "/bin/sh"} do
         syslog.log("Trying", v)
         init_ok, init_err = pcall(syscalls.exec, init_process, nil, v)
-        if not init_ok then syslog.log({level = 4, process = 0}, "Could not load init:", init_err) end
+        if not init_ok then syslog.log({level = "error", process = 0}, "Could not load init:", init_err) end
         if init_ok then break end
     end
     if not init_ok then panic("No working init found") end
@@ -160,4 +160,4 @@ while processes[init_pid] do
     terminal.redraw(currentTTY)
 end
 end, debug.traceback)
-if not ok then syslog.log({level = 5}, err) end
+if not ok then syslog.log({level = "critical"}, err) end

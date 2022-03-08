@@ -49,7 +49,8 @@ deviceTreeRoot = {
     metadata = {},      -- external static metadata table for driver use - this MUST NOT be modified after registration!
     internalState = {}, -- internal state table for driver use - this may change during use
                         -- drivers should make their own table inside!!!
-    children = {}
+    children = {},
+    listeners = setmetatable({}, {__mode = "k"}),
 }
 
 local deviceUUIDs = {[deviceTreeRoot.uuid] = deviceTreeRoot}
@@ -106,7 +107,8 @@ function hardware.add(parent, name)
         drivers = {},
         metadata = {},
         internalState = {},
-        children = {}
+        children = {},
+        listeners = setmetatable({}, {__mode = "k"}),
     }
     parent.children[name] = node
     deviceUUIDs[node.uuid] = node
@@ -196,6 +198,14 @@ function hardware.unlisten(callback)
     end
 end
 
+function hardware.broadcast(node, event, param)
+    expect(1, node, "table")
+    expect(2, event, "table")
+    expect.field(node, "uuid", "string")
+    if not deviceUUIDs[node.uuid] then error("bad argument #1 (invalid node)", 2) end
+    for v in pairs(node.listeners) do v.eventQueue[#v.eventQueue+1] = {event, param} end
+end
+
 -- Syscalls
 
 function syscalls.devlookup(process, thread, name)
@@ -264,6 +274,14 @@ function syscalls.devlisten(process, thread, device, state)
     if state == nil then state = true end
     local node = hardware.get(device)
     if not node then error("No such device", 2) end
+    if state then
+        for _, v in ipairs(node.listeners) do if v == process then return end end
+        node.listeners[process] = true
+        process.dependents[#process.dependents+1] = {type = "hardware listen", node = node, gc = function() node.listeners[process] = nil end}
+    else
+        node.listeners[process] = nil
+        for i, v in ipairs(process.dependents) do if v.type == "hardware listen" and v.node == node then table.remove(process.dependents, i) break end end
+    end
 end
 
 function syscalls.devlock(process, thread, device, wait)

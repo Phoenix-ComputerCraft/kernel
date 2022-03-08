@@ -270,7 +270,7 @@ function executeThread(process, thread, ev, dead, allWaiting)
                 thread.syscall_return = table.pack(xpcall(syscalls[params[3]], debug.traceback, process, thread, table.unpack(params, 4, params.n)))
                 process.systime = process.systime + (os.epoch "utc" - start) / 1000
                 if not thread.syscall_return[1] and type(thread.syscall_return[2]) == "string" then
-                    syslog.log({level = 0, category = "Syscall Failure", process = 0}, thread.syscall_return[2])
+                    syslog.log({level = "debug", category = "Syscall Failure", process = 0}, thread.syscall_return[2])
                     thread.syscall_return[2] = thread.syscall_return[2]:gsub("kernel:%d+: ", "")
                 end
                 if thread.syscall_return[2] == kSyscallYield then
@@ -287,7 +287,7 @@ function executeThread(process, thread, ev, dead, allWaiting)
             else process.lastReturnValue = {pid = process.id, thread = thread.id, error = process[2], traceback = debug.traceback(thread.coro)} end
             if not params[1] then
                 thread.did_error = true
-                syslog.log({level = 0, process = process.id, thread = thread.id, category = "Application Error"}, debug.traceback(thread.coro, params[2]))
+                syslog.log({level = "debug", process = process.id, thread = thread.id, category = "Application Error"}, debug.traceback(thread.coro, params[2]))
                 if params[2] and process.stderr and process.stderr.isTTY then terminal.write(process.stderr, params[2] .. "\n") end
             end
             process.threads[thread.id] = nil
