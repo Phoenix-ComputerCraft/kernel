@@ -42,6 +42,11 @@ end
 local function checkCall(self)
     self.internalState.peripheral = self.internalState.peripheral or {}
     if not self.internalState.peripheral.call then self.internalState.peripheral.call = peripheral.call end
+    if self.internalState.peripheral.call == peripheral.call or not self.parent then
+        self.internalState.peripheral.getMethods = peripheral.getMethods
+    else
+        self.internalState.peripheral.getMethods = function(id) return peripheral.call(self.parent.id, "getMethodsRemote", id) end
+    end
 end
 
 local function shadowTable(process, mt)
@@ -138,7 +143,6 @@ drivers.root = {
     type = "computer",
     properties = {
         "isOn",
-        "id",
         "label"
     },
     methods = {}
@@ -146,10 +150,6 @@ drivers.root = {
 
 function drivers.root.methods:getIsOn(process)
     return true
-end
-
-function drivers.root.methods:getId(process)
-    return os.getComputerID()
 end
 
 function drivers.root.methods:getLabel(process)
@@ -188,6 +188,7 @@ function drivers.root:init()
         end
     end
     self.displayName = os.getComputerLabel()
+    self.metadata.id = os.getComputerID();
 end
 
 function drivers.root:deinit()
@@ -263,14 +264,12 @@ drivers.peripheral_computer = {
     type = "computer",
     properties = {
         "isOn",
-        "id",
         "label"
     },
     methods = {}
 }
 
 drivers.peripheral_computer.methods.getIsOn = noArgMethod "isOn"
-drivers.peripheral_computer.methods.getId = noArgMethod "getID"
 drivers.peripheral_computer.methods.getLabel = noArgMethod "getLabel"
 drivers.peripheral_computer.methods.turnOn = noArgRootMethod "turnOn"
 drivers.peripheral_computer.methods.shutdown = noArgRootMethod "shutdown"
@@ -279,7 +278,8 @@ drivers.peripheral_computer.methods.reboot = noArgRootMethod "reboot"
 function drivers.peripheral_command:init()
     checkCall(self)
     local label = self.internalState.peripheral.call(self.id, "getLabel")
-    self.displayName = (label or ("Computer " .. self.internalState.peripheral.call(self.id, "getID"))) .. " at " .. self.id
+    self.metadata.id = self.internalState.peripheral.call(self.id, "getID")
+    self.displayName = (label or ("Computer " .. self.metadata.id)) .. " at " .. self.id
 end
 
 register "computer"
@@ -350,18 +350,17 @@ drivers.peripheral_energy_storage = {
     name = "peripheral_energy_storage",
     type = "energy_storage",
     properties = {
-        "energy",
-        "capacity"
+        "energy"
     },
     methods = {}
 }
 
 drivers.peripheral_energy_storage.methods.getEnergy = noArgMethod "getEnergy"
-drivers.peripheral_energy_storage.methods.getCapacity = noArgMethod "getEnergyCapacity"
 
 function drivers.peripheral_energy_storage:init()
     checkCall(self)
     self.displayName = "Energy storage block at " .. self.id
+    self.metadata.capacity = self.internalState.peripheral.call(self.id, "getEnergyCapacity")
 end
 
 register "energy_storage"
@@ -426,13 +425,11 @@ drivers.peripheral_inventory = {
     name = "peripheral_inventory",
     type = "inventory",
     properties = {
-        "size",
         "items"
     },
     methods = {}
 }
 
-drivers.peripheral_inventory.methods.getSize = noArgMethod "size"
 drivers.peripheral_inventory.methods.getItems = noArgMethod "list"
 drivers.peripheral_inventory.methods.detail = oneArgMethod "getItemDetail" ("number")
 drivers.peripheral_inventory.methods.limit = oneArgMethod "getItemLimit" ("number")
@@ -474,12 +471,108 @@ end
 function drivers.peripheral_inventory:init()
     checkCall(self)
     self.displayName = "Inventory at " .. self.id
+    self.metadata.size = self.internalState.peripheral.call(self.id, "size")
 end
 
 register "inventory"
 
 --#endregion
 --#region Monitor peripheral
+
+drivers.peripheral_monitor = {
+    name = "peripheral_monitor",
+    type = "monitor",
+    properties = {
+        "scale",
+        "size"
+    },
+    methods = {}
+}
+
+drivers.peripheral_monitor.methods.getScale = noArgMethod "getTextScale"
+drivers.peripheral_monitor.methods.setScale = oneArgMethod "setTextScale" ("number")
+
+function drivers.peripheral_monitor.methods:getSize()
+    local w, h = self.internalState.peripheral.call(self.id, "getSize")
+    return {width = w, height = h}
+end
+
+function drivers.peripheral_monitor.methods:write(process, ...)
+    for i, v in ipairs{...} do
+        if i > 1 then terminal.write(self.internalState.tty, "\t") end
+        terminal.write(self.internalState.tty, v)
+    end
+    terminal.redraw(self.internalState.tty)
+end
+
+function drivers.peripheral_monitor.methods:termctl(process, flags)
+    expect(1, flags, "table", "nil")
+    if flags then
+        expect.field(flags, "cbreak", "boolean", "nil")
+        expect.field(flags, "delay", "boolean", "nil")
+        expect.field(flags, "echo", "boolean", "nil")
+        expect.field(flags, "keypad", "boolean", "nil")
+        expect.field(flags, "nlcr", "boolean", "nil")
+        expect.field(flags, "raw", "boolean", "nil")
+        for k, v in pairs(flags) do if self.internalState.tty.flags[k] ~= nil then self.internalState.tty.flags[k] = v end end
+    end
+    local t = deepcopy(self.internalState.tty.flags)
+    t.hasgfx = term.getGraphicsMode ~= nil
+    return t
+end
+
+function drivers.peripheral_monitor.methods:openterm(process)
+    return terminal.openterm(self.internalState.tty, process)
+end
+
+function drivers.peripheral_monitor.methods:opengfx(process)
+    return terminal.opengfx(self.internalState.tty, process)
+end
+
+function drivers.peripheral_monitor:init()
+    checkCall(self)
+    local w, h = self.internalState.peripheral.call(self.id, "getSize")
+    local scale = self.internalState.peripheral.call(self.id, "getTextScale")
+    self.displayName = (w * scale) .. "x" .. (h * scale) .. " monitor at " .. self.id
+    local term = {}
+    for _, v in ipairs(self.internalState.peripheral.getMethods(self.id)) do
+        term[v] = function(...) return self.internalState.peripheral.call(self.id, v, ...) end
+    end
+    self.internalState.tty = terminal.makeTTY(term, w, h)
+    self.internalState.tty.isMonitor = true
+    terminal.redraw(self.internalState.tty, true)
+end
+
+function drivers.peripheral_monitor:deinit()
+    local tty = self.internalState.tty
+    if tty.frontmostProcess then
+        local v = tty.frontmostProcess
+        if v.stdin == tty then v.stdin = nil end
+        if v.stdout == tty then v.stdout = nil end
+        if v.stderr == tty then v.stderr = nil end
+    end
+    for _, v in ipairs(tty.processList) do
+        if v.stdin == tty then v.stdin = nil end
+        if v.stdout == tty then v.stdout = nil end
+        if v.stderr == tty then v.stderr = nil end
+    end
+end
+
+register "monitor"
+
+eventHooks.monitor_resize = eventHooks.monitor_resize or {}
+eventHooks.monitor_resize[#eventHooks.monitor_resize+1] = function(ev)
+    local node = getNodeById(ev[2])
+    if not node then
+        syslog.log({level = "notice", module = "Hardware"}, "Received " .. ev[1] .. " event for device ID " .. ev[2] .. ", but no device node was found; ignoring")
+        return
+    end
+    local w, h = drivers.peripheral_monitor.methods.getSize(node)
+    terminal.resize(node.internalState.tty, w, h)
+    hardware.broadcast(node, "monitor_resize", {device = hardware.path(node), width = w, height = h})
+end
+
+-- TODO: monitor_touch/mouse event handling
 
 --#endregion
 --#region Printer peripheral
@@ -636,5 +729,62 @@ end
 
 --#endregion
 --#region Modem peripheral
+
+local peripheralDrivers = {
+    drivers.peripheral_command, drivers.peripheral_computer,
+    drivers.peripheral_drive, drivers.peripheral_energy_storage,
+    drivers.peripheral_fluid_storage, drivers.peripheral_inventory,
+    drivers.peripheral_monitor, drivers.peripheral_printer,
+    drivers.peripheral_speaker
+}
+
+drivers.peripheral_modem = {
+    name = "peripheral_modem",
+    type = "modem",
+    properties = {},
+    methods = {}
+}
+
+drivers.peripheral_modem.methods.open = oneArgMethod "open" ("number")
+drivers.peripheral_modem.methods.isOpen = oneArgMethod "isOpen" ("number")
+drivers.peripheral_modem.methods.close = oneArgMethod "close" ("number")
+drivers.peripheral_modem.methods.closeAll = noArgMethod "closeAll"
+
+function drivers.peripheral_modem.methods:transmit(process, channel, replyChannel, payload)
+    expect(1, channel, "number")
+    replyChannel = expect(2, replyChannel, "number", "nil") or channel
+    return self.internalState.peripheral.call(self.id, "transmit", channel, replyChannel, payload)
+end
+
+function drivers.peripheral_modem:init()
+    checkCall(self)
+    self.metadata.wireless = self.internalState.peripheral.call(self.id, "isWireless")
+    self.displayName = (self.metadata.wireless and "Wireless" or "Wired") .. " modem at " .. self.id
+    if not self.metadata.wireless then
+        self.internalState.modem = {}
+        self.internalState.modem.callbacks = {}
+        for _, v in ipairs(peripheralDrivers) do
+            local f = peripheralTypeCallback(v, v.type)
+            hardware.listen(f, self)
+            self.internalState.modem.callbacks[#self.internalState.modem.callbacks+1] = f
+        end
+    end
+end
+
+function drivers.peripheral_modem:deinit()
+    if not self.metadata.wireless then for _, v in ipairs(self.internalState.modem.callbacks) do hardware.unlisten(v) end end
+end
+
+register "modem"
+
+eventHooks.modem_message = eventHooks.modem_message or {}
+eventHooks.modem_message[#eventHooks.modem_message+1] = function(ev)
+    local node = getNodeById(ev[2])
+    if not node then
+        syslog.log({level = "notice", module = "Hardware"}, "Received " .. ev[1] .. " event for device ID " .. ev[2] .. ", but no device node was found; ignoring")
+        return
+    end
+    hardware.broadcast(node, "modem_message", {device = hardware.path(node), channel = ev[3], replyChannel = ev[4], message = ev[5], distance = ev[6]})
+end
 
 --#endregion

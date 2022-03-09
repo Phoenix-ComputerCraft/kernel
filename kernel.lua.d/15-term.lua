@@ -32,7 +32,7 @@ function terminal.makeTTY(term, width, height)
         retval.dirtyLines[y] = true
     end
     for i = 0, 15 do
-        retval.palette[i] = {term.nativePaletteColor(2^i)}
+        retval.palette[i] = {_G.term.nativePaletteColor(2^i)}
         retval.dirtyPalette[i] = true
     end
     return retval
@@ -67,8 +67,7 @@ eventHooks.key = eventHooks.key or {}
 eventHooks.key_up = eventHooks.key_up or {}
 eventHooks.term_resize[#eventHooks.term_resize+1] = function()
     local w, h = term.getSize()
-    -- TODO
-    --for i = 1, 8 do TTY[i]:resize(w, h) end
+    for i = 1, 8 do terminal.resize(TTY[i], w, h) end
 end
 eventHooks.char[#eventHooks.char+1] = function(ev)
     if not currentTTY.isLocked then
@@ -130,7 +129,7 @@ eventHooks.key_up[#eventHooks.key_up+1] = function(ev)
 end
 
 function terminal.redraw(tty, full)
-    if currentTTY ~= tty then return end
+    if currentTTY ~= tty and not tty.isMonitor then return end
     local term = tty.term
     local buffer = tty
     if tty.isLocked then
@@ -185,6 +184,95 @@ function terminal.redraw(tty, full)
     term.setCursorPos(buffer.cursor.x, buffer.cursor.y)
     term.setCursorBlink(buffer.cursorBlink)
     buffer.dirtyLines, buffer.dirtyPalette = {}, {}
+end
+
+function terminal.resize(tty, width, height)
+    if width > tty.size.width then
+        for y = 1, tty.size.height do
+            tty[y][1] = tty[y][1] .. (' '):rep(width - tty.size.width)
+            tty[y][2] = tty[y][2] .. tty.colors.fg:rep(width - tty.size.width)
+            tty[y][3] = tty[y][3] .. tty.colors.bg:rep(width - tty.size.width)
+            tty.dirtyLines[y] = true
+        end
+        if tty.isLocked then
+            if tty.isGraphics then
+                for y = 1, tty.size.height * 9 do
+                    tty.graphicsBuffer[y] = tty.graphicsBuffer[y] .. ('\15'):rep((width - tty.size.width) * 6)
+                end
+                tty.graphicsBuffer.dirtyRects[#tty.graphicsBuffer.dirtyRects+1] = {
+                    x = tty.size.width * 6 + 1, y = 1,
+                    width = (width - tty.size.width) * 6, height = tty.size.height * 9
+                }
+            else
+                for y = 1, tty.size.height do
+                    tty.textBuffer[y][1] = tty.textBuffer[y][1] .. (' '):rep(width - tty.size.width)
+                    tty.textBuffer[y][2] = tty.textBuffer[y][2] .. tty.textBuffer.colors.fg:rep(width - tty.size.width)
+                    tty.textBuffer[y][3] = tty.textBuffer[y][3] .. tty.textBuffer.colors.bg:rep(width - tty.size.width)
+                    tty.textBuffer.dirtyLines[y] = true
+                end
+            end
+        end
+    elseif width < tty.size.width then
+        for y = 1, tty.size.height do
+            tty[y][1] = tty[y][1]:sub(1, width)
+            tty[y][2] = tty[y][2]:sub(1, width)
+            tty[y][3] = tty[y][3]:sub(1, width)
+            tty.dirtyLines[y] = true
+        end
+        if tty.isLocked then
+            if tty.isGraphics then
+                for y = 1, tty.size.height * 9 do
+                    tty.graphicsBuffer[y] = tty.graphicsBuffer[y]:sub(1, width * 6)
+                end
+            else
+                for y = 1, tty.size.height do
+                    tty.textBuffer[y][1] = tty.textBuffer[y][1]:sub(1, width)
+                    tty.textBuffer[y][2] = tty.textBuffer[y][2]:sub(1, width)
+                    tty.textBuffer[y][3] = tty.textBuffer[y][3]:sub(1, width)
+                end
+            end
+        end
+    end
+    tty.size.width = width
+
+    if height > tty.size.height then
+        for y = tty.size.height + 1, height do
+            tty[y] = {(' '):rep(width), tty.colors.fg:rep(width), tty.colors.bg:rep(width)}
+            tty.dirtyLines[y] = true
+        end
+        if tty.isLocked then
+            if tty.isGraphics then
+                for y = tty.size.height * 9 + 1, height * 9 do
+                    tty.graphicsBuffer[y] = ('\15'):rep(width * 6)
+                end
+                tty.graphicsBuffer.dirtyRects[#tty.graphicsBuffer.dirtyRects+1] = {
+                    x = 1, y = tty.size.height * 9 + 1,
+                    width = tty.size.width * 6, height = (height - tty.size.height) * 9
+                }
+            else
+                for y = tty.size.height + 1, height do
+                    tty.textBuffer[y] = {(' '):rep(width), tty.textBuffer.colors.fg:rep(width), tty.textBuffer.colors.bg:rep(width)}
+                    tty.textBuffer.dirtyLines[y] = true
+                end
+            end
+        end
+    elseif height < tty.size.height then
+        for y = height + 1, tty.size.height do
+            tty[y] = nil
+        end
+        if tty.isLocked then
+            if tty.isGraphics then
+                for y = height + 1, tty.size.height do
+                    tty.textBuffer[y] = nil
+                end
+            else
+                for y = height * 9 + 1, tty.size.height * 9 do
+                    tty.graphicsBuffer[y] = nil
+                end
+            end
+        end
+    end
+    tty.size.height = height
 end
 
 local function nextline(tty)
@@ -649,18 +737,13 @@ function syscalls.termctl(process, thread, flags)
         for k, v in pairs(flags) do if process.stdout.flags[k] ~= nil then process.stdout.flags[k] = v end end
     end
     local t = deepcopy(process.stdout.flags)
-    t.hasgfx = process.stdout.term.getGraphicsMode ~= nil
+    t.hasgfx = term.getGraphicsMode ~= nil
     return t
 end
 
-function syscalls.openterm(process, thread)
-    if not process.stdout or not process.stdout.isTTY then return nil, "No valid TTY attached" end
-    if process ~= process.stdout.frontmostProcess then
-        syscalls.kill(KERNEL, nil, process.id, 22)
-        if process.paused then return kSyscallYield, "openterm" end
-    end
-    if process.stdout.isLocked then return nil, "Terminal already in use" end
-    local size = process.stdout.size
+function terminal.openterm(tty, process)
+    if tty.isLocked then return nil, "Terminal already in use" end
+    local size = tty.size
     local buffer = {
         cursor = {x = 1, y = 1},
         cursorBlink = false,
@@ -669,9 +752,9 @@ function syscalls.openterm(process, thread)
         dirtyLines = {},
         dirtyPalette = {},
     }
-    process.stdout.textBuffer = buffer
-    process.stdout.isLocked = true
-    process.stdout.isGraphics = false
+    tty.textBuffer = buffer
+    tty.isLocked = true
+    tty.isGraphics = false
     for y = 1, size.height do
         buffer[y] = {(' '):rep(size.width), ('0'):rep(size.width), ('f'):rep(size.width)}
         buffer.dirtyLines[y] = true
@@ -688,8 +771,8 @@ function syscalls.openterm(process, thread)
     function win.close()
         if not win then error("terminal is already closed", 2) end
         win = nil
-        process.stdout.isLocked = false
-        redraw(process.stdout, true)
+        tty.isLocked = false
+        redraw(tty, true)
     end
 
     function win.write(text)
@@ -711,7 +794,7 @@ function syscalls.openterm(process, thread)
         buffer[buffer.cursor.y][3] = buffer[buffer.cursor.y][3]:sub(1, buffer.cursor.x - 1) .. buffer.colors.bg:rep(#text) .. buffer[buffer.cursor.y][3]:sub(buffer.cursor.x + #text)
         buffer.cursor.x = buffer.cursor.x + ntext
         buffer.dirtyLines[buffer.cursor.y] = true
-        --redraw(process.stdout)
+        --redraw(tty)
     end
 
     function win.blit(text, fg, bg)
@@ -724,7 +807,7 @@ function syscalls.openterm(process, thread)
         if buffer.cursor.y < 1 or buffer.cursor.y > size.height then return
         elseif buffer.cursor.x > size.width or buffer.cursor.x < 1 - #text then
             buffer.cursor.x = buffer.cursor.x + #text
-            redraw(process.stdout)
+            redraw(tty)
             return
         elseif buffer.cursor.x < 1 then
             text, fg, bg = text:sub(-buffer.cursor.x + 2), fg:sub(-buffer.cursor.x + 2), bg:sub(-buffer.cursor.x + 2)
@@ -737,7 +820,7 @@ function syscalls.openterm(process, thread)
         buffer[buffer.cursor.y][3] = buffer[buffer.cursor.y][3]:sub(1, buffer.cursor.x - 1) .. bg .. buffer[buffer.cursor.y][3]:sub(buffer.cursor.x + #bg)
         buffer.cursor.x = buffer.cursor.x + ntext
         buffer.dirtyLines[buffer.cursor.y] = true
-        --redraw(process.stdout)
+        --redraw(tty)
     end
 
     function win.clear()
@@ -746,7 +829,7 @@ function syscalls.openterm(process, thread)
             buffer[y] = {(' '):rep(size.width), buffer.colors.fg:rep(size.width), buffer.colors.bg:rep(size.width)}
             buffer.dirtyLines[y] = true
         end
-        --redraw(process.stdout)
+        --redraw(tty)
     end
 
     function win.clearLine()
@@ -754,7 +837,7 @@ function syscalls.openterm(process, thread)
         if buffer.cursor.y >= 1 and buffer.cursor.y <= size.height then
             buffer[buffer.cursor.y] = {(' '):rep(size.width), buffer.colors.fg:rep(size.width), buffer.colors.bg:rep(size.width)}
             buffer.dirtyLines[buffer.cursor.y] = true
-            --redraw(process.stdout)
+            --redraw(tty)
         end
     end
 
@@ -769,7 +852,7 @@ function syscalls.openterm(process, thread)
         expect(2, cy, "number")
         if cx == buffer.cursor.x and cy == buffer.cursor.y then return end
         buffer.cursor.x, buffer.cursor.y = cx, cy
-        --redraw(process.stdout)
+        --redraw(tty)
     end
 
     function win.getCursorBlink()
@@ -781,7 +864,7 @@ function syscalls.openterm(process, thread)
         if not win then error("terminal is already closed", 2) end
         expect(1, b, "boolean")
         buffer.cursorBlink = b
-        --redraw(process.stdout)
+        --redraw(tty)
     end
 
     function win.isColor()
@@ -807,7 +890,7 @@ function syscalls.openterm(process, thread)
             for i = 1, -lines do buffer[i] = {(' '):rep(size.width), buffer.colors.fg:rep(size.width), buffer.colors.bg:rep(size.width)} end
         else return end
         for i = 1, size.height do buffer.dirtyLines[i] = true end
-        --redraw(process.stdout)
+        --redraw(tty)
     end
 
     function win.getTextColor()
@@ -854,7 +937,7 @@ function syscalls.openterm(process, thread)
         if b < 0 or b > 1 then error("bad argument #4 (value out of range)", 2) end
         buffer.palette[math.floor(color)] = {r, g, b}
         buffer.dirtyPalette[math.floor(color)] = true
-        --redraw(process.stdout)
+        --redraw(tty)
     end
 
     for _, v in pairs(win) do setfenv(v, process.env) debug.protect(v) end
@@ -866,28 +949,32 @@ function syscalls.openterm(process, thread)
     win.getPaletteColour = win.getPaletteColor
     win.setPaletteColour = win.setPaletteColor
     process.dependents[#process.dependents+1] = {gc = function() if win then return win.close() end end}
-    redraw(process.stdout, true)
+    redraw(tty, true)
     return win
 end
 
-function syscalls.opengfx(process, thread)
-    if not term.drawPixels then return nil, "Graphics mode not supported" end
+function syscalls.openterm(process, thread)
     if not process.stdout or not process.stdout.isTTY then return nil, "No valid TTY attached" end
     if process ~= process.stdout.frontmostProcess then
         syscalls.kill(KERNEL, nil, process.id, 22)
-        if process.paused then return kSyscallYield, "opengfx" end
+        if process.paused then return kSyscallYield, "openterm" end
     end
-    if process.stdout.isLocked then return nil, "Terminal already in use" end
-    local size = process.stdout.size
+    return terminal.openterm(process.stdout, process)
+end
+
+function terminal.opengfx(tty, process)
+    if not term.drawPixels then return nil, "Graphics mode not supported" end
+    if tty.isLocked then return nil, "Terminal already in use" end
+    local size = tty.size
     local buffer = {
         palette = {},
         dirtyRects = {},
         dirtyPalette = {},
         frozen = false,
     }
-    process.stdout.graphicsBuffer = buffer
-    process.stdout.isLocked = true
-    process.stdout.isGraphics = true
+    tty.graphicsBuffer = buffer
+    tty.isLocked = true
+    tty.isGraphics = true
     for y = 1, size.height * 9 do buffer[y] = ('\15'):rep(size.width * 6) end
     for i = 0, 15 do
         buffer.palette[i] = {term.nativePaletteColor(2^i)}
@@ -905,8 +992,8 @@ function syscalls.opengfx(process, thread)
     function win.close()
         if not win then error("terminal is already closed", 2) end
         win = nil
-        process.stdout.isLocked = false
-        redraw(process.stdout, true)
+        tty.isLocked = false
+        redraw(tty, true)
     end
 
     function win.getSize()
@@ -916,7 +1003,7 @@ function syscalls.opengfx(process, thread)
     function win.clear()
         if not win then error("terminal is already closed", 2) end
         for y = 1, size.height * 9 do buffer[y] = ('\15'):rep(size.width * 6) end
-        redraw(process.stdout, true)
+        redraw(tty, true)
     end
 
     function win.getPixel(x, y)
@@ -938,7 +1025,7 @@ function syscalls.opengfx(process, thread)
         expect.range(color, 0, 255)
         buffer[y+1] = buffer[y+1]:sub(1, x) .. string.char(color) .. buffer[y+1]:sub(x + 2)
         buffer.dirtyRects[#buffer.dirtyRects+1] = {x = x, y = y, color = color}
-        --if not buffer.frozen then redraw(process.stdout) end
+        --if not buffer.frozen then redraw(tty) end
     end
 
     function win.getPixels(x, y, width, height, asStr)
@@ -1001,7 +1088,7 @@ function syscalls.opengfx(process, thread)
             end
         end
         buffer.dirtyRects[#buffer.dirtyRects+1] = rect
-        --if not buffer.frozen then redraw(process.stdout) end
+        --if not buffer.frozen then redraw(tty) end
     end
 
     function win.getFrozen()
@@ -1013,7 +1100,7 @@ function syscalls.opengfx(process, thread)
         if not win then error("terminal is already closed", 2) end
         expect(1, f, "boolean")
         buffer.frozen = f
-        --if not buffer.frozen then redraw(process.stdout) end
+        --if not buffer.frozen then redraw(tty) end
     end
 
     function win.getPaletteColor(color)
@@ -1036,15 +1123,24 @@ function syscalls.opengfx(process, thread)
         expect.range(color, 0, 255)
         buffer.palette[color] = {r, g, b}
         buffer.dirtyPalette[color] = true
-        --if not buffer.frozen then redraw(process.stdout) end
+        --if not buffer.frozen then redraw(tty) end
     end
 
     for _, v in pairs(win) do setfenv(v, process.env) debug.protect(v) end
     win.getPaletteColour = win.getPaletteColor
     win.setPaletteColour = win.setPaletteColor
     process.dependents[#process.dependents+1] = {gc = function() if win then return win.close() end end}
-    redraw(process.stdout, true)
+    redraw(tty, true)
     return win
+end
+
+function syscalls.opengfx(process, thread)
+    if not process.stdout or not process.stdout.isTTY then return nil, "No valid TTY attached" end
+    if process ~= process.stdout.frontmostProcess then
+        syscalls.kill(KERNEL, nil, process.id, 22)
+        if process.paused then return kSyscallYield, "openterm" end
+    end
+    return terminal.opengfx(process.stdout, process)
 end
 
 function syscalls.mktty(process, thread, width, height)
@@ -1060,12 +1156,23 @@ function syscalls.mktty(process, thread, width, height)
 end
 
 function syscalls.stdin(process, thread, handle)
-    expect(1, handle, "number", "table", "nil")
+    expect(1, handle, "number", "table", "string", "nil")
     if process.stdin and process.stdin.isTTY and process.stdin.frontmostProcess == process then
         process.stdin.frontmostProcess = table.remove(process.stdin.processList)
         process.stdin.preBuffer = ""
     end
     if type(handle) == "number" then process.stdin = TTY[handle]
+    elseif type(handle) == "string" then
+        local node = hardware.get(handle)
+        if not node then error("bad argument #1 (no such device)", 2) end
+        if not node.internalState.tty then error("bad argument #1 (no TTY available on device)", 2) end
+        handle = node.internalState.tty
+        if process.stdin.frontmostProcess ~= process then
+            process.stdin.frontmostProcess = table.remove(process.stdin.processList)
+            handle.processList[#handle.processList+1] = handle.frontmostProcess
+            handle.frontmostProcess = process
+        end
+        process.stdin = handle
     elseif handle == nil then process.stdin = nil
     else
         if handle.isTTY then
@@ -1093,11 +1200,22 @@ function syscalls.stdin(process, thread, handle)
 end
 
 function syscalls.stdout(process, thread, handle)
-    expect(1, handle, "number", "table", "nil")
+    expect(1, handle, "number", "table", "string", "nil")
     if process.stdout and process.stdout.isTTY and process.stdout.frontmostProcess == process then
         process.stdout.frontmostProcess = table.remove(process.stdout.processList)
     end
     if type(handle) == "number" then process.stdout = TTY[handle]
+    elseif type(handle) == "string" then
+        local node = hardware.get(handle)
+        if not node then error("bad argument #1 (no such device)", 2) end
+        if not node.internalState.tty then error("bad argument #1 (no TTY available on device)", 2) end
+        handle = node.internalState.tty
+        if process.stdout.frontmostProcess ~= process then
+            process.stdout.frontmostProcess = table.remove(process.stdout.processList)
+            handle.processList[#handle.processList+1] = handle.frontmostProcess
+            handle.frontmostProcess = process
+        end
+        process.stdout = handle
     elseif handle == nil then process.stdout = nil
     else
         if handle.isTTY then
@@ -1123,11 +1241,22 @@ function syscalls.stdout(process, thread, handle)
 end
 
 function syscalls.stderr(process, thread, handle)
-    expect(1, handle, "number", "table", "nil")
-    if process.stderr and process.stdout.isTTY and process.stdout.frontmostProcess == process then
-        process.stdout.frontmostProcess = table.remove(process.stdout.processList)
+    expect(1, handle, "number", "table", "string", "nil")
+    if process.stderr and process.stderr.isTTY and process.stderr.frontmostProcess == process then
+        process.stderr.frontmostProcess = table.remove(process.stderr.processList)
     end
     if type(handle) == "number" then process.stderr = TTY[handle]
+    elseif type(handle) == "string" then
+        local node = hardware.get(handle)
+        if not node then error("bad argument #1 (no such device)", 2) end
+        if not node.internalState.tty then error("bad argument #1 (no TTY available on device)", 2) end
+        handle = node.internalState.tty
+        if process.stderr.frontmostProcess ~= process then
+            process.stderr.frontmostProcess = table.remove(process.stderr.processList)
+            handle.processList[#handle.processList+1] = handle.frontmostProcess
+            handle.frontmostProcess = process
+        end
+        process.stderr = handle
     elseif handle == nil then process.stderr = nil
     else
         if handle.isTTY then

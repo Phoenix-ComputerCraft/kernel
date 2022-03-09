@@ -62,7 +62,7 @@ function hardware.get(path)
     elseif path:find("/") then
         -- Absolute path
         local node = deviceTreeRoot
-        for name in path:gmatch "^/" do
+        for name in path:gmatch "[^/]+" do
             node = node.children[name]
             if node == nil then break end
         end
@@ -224,7 +224,7 @@ function syscalls.devinfo(process, thread, device)
     return {
         id = node.id,
         uuid = node.uuid,
-        parent = hardware.path(node.parent),
+        parent = node.parent and hardware.path(node.parent) or "/",
         displayName = node.displayName,
         types = types,
         metadata = deepcopy(node.metadata)
