@@ -48,8 +48,8 @@ do
     for k,v in pairs(env) do keys[k] = v end
 end
 
--- load is the de facto loader - loadstring will no longer be available. Since load isn't available on 5.1 (at least for strings), we shim it first.
-if loadstring and setfenv then
+-- load is the de facto loader - loadstring will no longer be available. Since load for strings isn't available on old versions of Lua/Cobalt, we shim it if necessary.
+if not pcall(load, "return", "=test", "t", {}) then
     local old_load, old_loadstring, expect = load, loadstring, expect
     function load(chunk, name, mode, env)
         expect(1, chunk, "string", "function")
@@ -57,18 +57,18 @@ if loadstring and setfenv then
         expect(3, mode, "string", "nil")
         expect(4, env, "table", "nil")
         if type(chunk) == "string" then
-            if chunk:sub(1, 4) == "\033Lua" then
+            if chunk:sub(1, 4) == "\27Lua" then
                 if mode == nil or mode:find "b" then
                     local fn, err = old_loadstring(chunk, name)
                     if fn and env then setfenv(fn, env) end
                     return fn, err
-                else return nil, "attempt to load a binary chunk (mode is '" .. mode .. "')" end
+                else return nil, "attempt to load a binary chunk (mode is '" .. (mode or "bt") .. "')" end
             else
                 if mode == nil or mode:find "t" then
                     local fn, err = old_loadstring(chunk, name)
                     if fn and env then setfenv(fn, env) end
                     return fn, err
-                else return nil, "attempt to load a text chunk (mode is '" .. mode .. "')" end
+                else return nil, "attempt to load a text chunk (mode is '" .. (mode or "bt") .. "')" end
             end
         else
             local fn, err = old_load(chunk, name)
@@ -76,8 +76,8 @@ if loadstring and setfenv then
             return fn, err
         end
     end
-    loadstring = nil
 end
+loadstring = nil -- Make sure loadstring is always gone
 
 -- Remove bit and apply bit32, as this is a Lua 5.2 environment.
 if bit then

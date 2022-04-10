@@ -182,13 +182,19 @@ function drivers.root.methods:reboot(process)
 end
 
 function drivers.root:init()
+    local rsdev = hardware.add(self, "redstone")
+    for _, v in ipairs{"top", "bottom", "left", "right", "front", "back"} do
+        local d = hardware.add(rsdev, v)
+        d.internalState.redstone = {side = v}
+        hardware.register(d, drivers.root_redstone)
+    end
     for v in pairs(localPeripherals) do
         if peripheral.isPresent(v) then
             hardware.add(self, v)
         end
     end
     self.displayName = os.getComputerLabel()
-    self.metadata.id = os.getComputerID();
+    self.metadata.id = os.getComputerID()
 end
 
 function drivers.root:deinit()
@@ -197,6 +203,7 @@ function drivers.root:deinit()
             hardware.remove(self.children[v])
         end
     end
+    hardware.remove(hardware.get("/redstone"))
 end
 
 eventHooks.peripheral = eventHooks.peripheral or {}
@@ -232,6 +239,35 @@ eventHooks.peripheral_detach[#eventHooks.peripheral_detach+1] = function(ev)
 end
 
 rootDriver = drivers.root
+
+--#endregion
+--#region Redstone driver
+
+drivers.root_redstone = {
+    name = "root_redstone",
+    type = "redstone",
+    properties = {
+        "input",
+        "output",
+        "bundledInput",
+        "bundledOutput"
+    },
+    methods = {}
+}
+
+local function zeronil(n) if n == 0 then return nil else return n end end
+
+function drivers.root_redstone.methods:getInput() return zeronil(redstone.getAnalogInput(self.internalState.redstone.side)) end
+function drivers.root_redstone.methods:getOutput() return zeronil(redstone.getAnalogOutput(self.internalState.redstone.side)) end
+function drivers.root_redstone.methods:setOutput(process, n) n = expect(1, n, "number", "nil") or 0 expect.range(n, 0, 15) redstone.setAnalogOutput(self.internalState.redstone.side, n) end
+function drivers.root_redstone.methods:getBundledInput() return redstone.getBundledInput(self.internalState.redstone.side) end
+function drivers.root_redstone.methods:getBundledOutput() return redstone.getBundledOutput(self.internalState.redstone.side) end
+function drivers.root_redstone.methods:setBundledOutput(process, n) expect(1, n, "number") expect.range(n, 0, 65535) redstone.setBundledOutput(self.internalState.redstone.side, n) end
+
+function drivers.root_redstone:init()
+    if not self.internalState.redstone or not self.internalState.redstone.side then error("No assigned side on redstone device!", 2) end
+    self.displayName = "Redstone I/O on side " .. self.internalState.redstone.side
+end
 
 --#endregion
 --#region Command block peripheral
@@ -283,6 +319,8 @@ function drivers.peripheral_command:init()
 end
 
 register "computer"
+hardware.listen(peripheralTypeCallback(drivers["peripheral_computer"], "turtle"), deviceTreeRoot)
+
 
 --#endregion
 --#region Disk drive peripheral
@@ -768,6 +806,9 @@ function drivers.peripheral_modem:init()
             hardware.listen(f, self)
             self.internalState.modem.callbacks[#self.internalState.modem.callbacks+1] = f
         end
+        local f = peripheralTypeCallback(drivers["peripheral_computer"], "turtle")
+        hardware.listen(f, self)
+        self.internalState.modem.callbacks[#self.internalState.modem.callbacks+1] = f
     end
 end
 

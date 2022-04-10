@@ -127,7 +127,7 @@ function hardware.remove(node)
     if not deviceUUIDs[node.uuid] then return false, "Invalid node" end
     if node == deviceTreeRoot or not node.parent then return false, "Cannot remove root node" end
     for i = #node.drivers, 1, -1 do hardware.deregister(node, node.drivers[i]) end
-    -- By this point all children devices should be gone (right?)
+    for _, v in pairs(node.children) do hardware.remove(v) end -- Any children still present are removed immediately
     syslog.log({module = "Hardware"}, "Device at " .. hardware.path(node) .. " has been removed")
     node.parent.children[node.id] = nil
     deviceUUIDs[node.uuid] = nil

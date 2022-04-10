@@ -308,12 +308,12 @@ local CSI = {
     C = function(tty, params)
         local p = params[1] or 1
         if p == 0 then p = 1 end
-        tty.cursor.x = math.max(tty.cursor.x - p, 1)
+        tty.cursor.x = math.min(tty.cursor.x + p, tty.size.width)
     end, -- CUF
     D = function(tty, params)
         local p = params[1] or 1
         if p == 0 then p = 1 end
-        tty.cursor.x = math.min(tty.cursor.x + p, tty.size.width)
+        tty.cursor.x = math.max(tty.cursor.x - p, 1)
     end, -- CUB
     E = function(tty, params)
         local p = params[1] or 1
