@@ -1,5 +1,8 @@
 local do_syscall = do_syscall
 local expect = expect
+--- Creates a new global table with a Lua 5.2 standard library installed.
+-- @tparam Process process The process to generate for
+-- @treturn _G A new global table for the process
 function createLuaLib(process)
     local G = {}
     for _,v in ipairs{"assert", "error", "getfenv", "getmetatable", "ipairs", "next",

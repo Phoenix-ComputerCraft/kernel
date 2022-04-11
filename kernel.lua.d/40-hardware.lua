@@ -40,6 +40,7 @@ end
 
 local PHOENIX_ROOT_UUID = "a6f53b7d-50f3-4e51-adef-8728c83e3f3a"
 
+--- Stores the root device for hardware.
 deviceTreeRoot = {
     id = tostring(os.getComputerID()),
     uuid = makeUUID(PHOENIX_ROOT_UUID, tostring(os.getComputerID())),
@@ -56,6 +57,9 @@ deviceTreeRoot = {
 local deviceUUIDs = {[deviceTreeRoot.uuid] = deviceTreeRoot}
 local deviceListeners = {}
 
+--- Returns all devices that match a path specifier.
+-- @tparam string path The path to query
+-- @tparam Device... The device objects that match
 function hardware.get(path)
     expect(1, path, "string")
     if path:find("^%x+%-%x+%-%x+%-%x+%-%x+$") then return deviceUUIDs[path]
@@ -79,6 +83,9 @@ function hardware.get(path)
     end
 end
 
+--- Returns the absolute path to a device node.
+-- @tparam Device node The node to lookup
+-- @treturn string The path to the node
 function hardware.path(node)
     expect(1, node, "table")
     expect.field(node, "uuid", "string")
@@ -93,6 +100,10 @@ function hardware.path(node)
     return path == "" and "/" or path
 end
 
+--- Adds a new child to the specified node.
+-- @tparam Device parent The parent of the new node
+-- @tparam string name The name of the new node
+-- @treturn Device The newly added node
 function hardware.add(parent, name)
     expect(1, parent, "table")
     expect(2, name, "string")
@@ -121,6 +132,11 @@ function hardware.add(parent, name)
     return node
 end
 
+--- Removes a node from its parent and the device tree. The device node should
+-- no longer be used.
+-- @tparam Device node The node to remove
+-- @treturn boolean Whether the operation succeeded
+-- @treturn string? An error message if it failed
 function hardware.remove(node)
     expect(1, node, "table")
     expect.field(node, "uuid", "string")
@@ -135,6 +151,11 @@ function hardware.remove(node)
     return true
 end
 
+--- Registers a device driver on a node.
+-- @tparam Device node The node to modify
+-- @tparam Driver driver The driver to add
+-- @treturn boolean Whether the operation succeeded
+-- @treturn string? An error message if it failed
 function hardware.register(node, driver)
     expect(1, node, "table")
     expect(2, driver, "table")
@@ -162,10 +183,19 @@ function hardware.register(node, driver)
     return true
 end
 
+--- Returns a function that automatically attaches a driver to a node.
+-- @tparam Driver driver The driver to use
+-- @treturn function A function that takes a node and registers the driver on it
+-- @see hardware.listen For use with the callback parameter
 function hardware.register_callback(driver)
     return function(node) return hardware.register(node, driver) end
 end
 
+--- Deregisters a driver from a node.
+-- @tparam Device node The node to modify
+-- @tparam Driver driver The driver to remove
+-- @treturn boolean Whether the operation succeeded
+-- @treturn string? An error message if it failed
 function hardware.deregister(node, driver)
     expect(1, node, "table")
     expect(2, driver, "table")
@@ -180,6 +210,10 @@ function hardware.deregister(node, driver)
     return false
 end
 
+--- Adds a function that is called when either a parent node or pattern matches on a new node.
+-- @tparam function callback A function that is called with a node when the pattern matches
+-- @tparam[opt] Device parent A parent node to watch on
+-- @tparam[opt] string pattern A Lua pattern to match on the device name
 function hardware.listen(callback, parent, pattern)
     expect(1, callback, "function")
     expect(2, parent, "table", "nil")
@@ -189,6 +223,8 @@ function hardware.listen(callback, parent, pattern)
     deviceListeners[#deviceListeners+1] = {callback = callback, parent = parent, pattern = pattern}
 end
 
+--- Removes a listener callback from the listener list.
+-- @tparam function callback The function to remove
 function hardware.unlisten(callback)
     expect(1, callback, "function")
     local i = 1
@@ -198,9 +234,14 @@ function hardware.unlisten(callback)
     end
 end
 
+--- Broadcasts an event to all processes listening to events on a node.
+-- @tparam Device node The node to broadcast for
+-- @tparam string event The event to broadcast
+-- @tparam table param The parameters to pass for the event
 function hardware.broadcast(node, event, param)
     expect(1, node, "table")
-    expect(2, event, "table")
+    expect(2, event, "string")
+    expect(3, param, "table")
     expect.field(node, "uuid", "string")
     if not deviceUUIDs[node.uuid] then error("bad argument #1 (invalid node)", 2) end
     for v in pairs(node.listeners) do v.eventQueue[#v.eventQueue+1] = {event, param} end

@@ -4,11 +4,15 @@
 -- This is a PRE-RELEASE BUILD! Redistribution of this file is not permitted.
 -- See the Phoenix EULA (https://github.com/Phoenix-ComputerCraft/kernel/blob/master/LICENSE.md) for more information.
 
+--- Version number of Phoenix.
 PHOENIX_VERSION = "0.0.1"
+--- Build string of Phoenix.
 PHOENIX_BUILD = "PRERELEASE NONFREE $BUILD_DATE$"
 
+--- Stores the start time of the kernel.
 systemStartTime = os.epoch "utc"
 
+--- Stores all kernel arguments passed on the command line.
 args = {
     init = "/bin/cash.lua",
     root = "/root",
@@ -20,7 +24,9 @@ args = {
     console = "tty1"
 }
 
+--- Contains every syscall defined in the kernel.
 syscalls = {}
+--- Stores all currently running processes.
 processes = {
     [0] = {
         name = "kernel",
@@ -30,19 +36,30 @@ processes = {
         dependents = {}
     }
 }
+--- Stores a quick reference to the kernel process object.
 KERNEL = processes[0]
+--- Stores all currently loaded kernel modules.
+modules = {}
+--- Stores a list of hooks to call on certain CraftOS events. Each entry has the
+-- event name as a key, and a list of functions to call as the value. The
+-- functions are called with a single table parameter with the event parameters.
+eventHooks = {}
 
+-- Unique keys for certain internal uses.
 kSyscallYield = {}
 
+--- Process API
 process = {}
+--- Filesystem API
 filesystem = {}
+--- Terminal API
 terminal = {}
+--- User API
 user = {}
+--- System logger API
 syslog = {}
-modules = {}
+--- Hardware API
 hardware = {}
-
-eventHooks = {}
 
 -- ==== LOADER ====
 

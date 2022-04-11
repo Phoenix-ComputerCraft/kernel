@@ -217,12 +217,19 @@ function panic(message)
     while true do coroutine.yield() end
 end
 
+--- Small function to execute a syscall and error if it fails.
+-- @tparam string call The syscall to execute
+-- @tparam any ... The arguments to pass to the syscall
+-- @treturn any... The values returned from the syscall
 function do_syscall(call, ...)
     local res = table.pack(coroutine.yield("syscall", call, ...))
     if res[1] then return table.unpack(res, 2, res.n)
     else error(res[2], 3) end
 end
 
+--- Copies a value. If the value is a table, copies all of its contents too.
+-- @tparam any tab The value to copy
+-- @treturn any The new copied value
 function deepcopy(tab)
     if type(tab) == "table" then
         local retval = setmetatable({}, getmetatable(tab))
@@ -231,6 +238,10 @@ function deepcopy(tab)
     else return tab end
 end
 
+--- Splits a string by a separator.
+-- @tparam string str The string to split
+-- @tparam[opt="%s"] string sep The separator pattern to split by
+-- @treturn {string} A list of items in the string
 function split(str, sep)
     local t = {}
     for match in str:gmatch("[^" .. (sep or "%s") .. "]+") do t[#t+1] = match end
@@ -238,6 +249,14 @@ function split(str, sep)
 end
 
 local empty_packed_table = {n = 0}
+--- Resumes a thread's coroutine, handling different yield types.
+-- @tparam Process process The process that owns the thread
+-- @tparam Thread thread The thread to resume
+-- @tparam table ev An event to pass to the thread, if present
+-- @tparam boolean dead Whether a thread in the current run cycle has died
+-- @tparam boolean allWaiting Whether all previous threads were waiting for an event
+-- @treturn boolean Whether this thread or a previous thread has died
+-- @treturn boolean Whether all threads (including this one) are waiting for an event
 function executeThread(process, thread, ev, dead, allWaiting)
     local args
     if thread.status == "starting" then args = thread.args
@@ -302,6 +321,12 @@ function executeThread(process, thread, ev, dead, allWaiting)
     return dead, allWaiting
 end
 
+--- Executes a function in user mode from kernel code.
+-- @tparam Process process The process to execute as
+-- @tparam function func The function to execute
+-- @tparam any ... Any parameters to pass to the function
+-- @treturn boolean Whether the function returned successfully
+-- @treturn any The value that the function returned.
 function userModeCallback(process, func, ...)
     local thread = {
         id = -1,

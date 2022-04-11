@@ -1,3 +1,4 @@
+--- Stores all open system logs.
 syslogs = {
     default = {
         --file = filesystem.open(KERNEL, "/var/log/default.log", "a"),
@@ -272,7 +273,10 @@ function syslog.debug(...)
 end
 
 local oldpanic = panic
+--- Immediately halts the system and shows an error message on screen.
 -- This function can be called either standalone or from within xpcall.
+-- This function never returns.
+-- @tparam[opt] any message A message to display on screen
 function panic(message)
     syslog.log({level = "panic"}, "Kernel panic:", message)
     if debug then
@@ -286,6 +290,7 @@ end
 
 syslogs.default.file = filesystem.open(KERNEL, "/var/log/default.log", "a")
 
+syslog.log("Starting [REDACTED] version", PHOENIX_VERSION, PHOENIX_BUILD)
 syslog.log("Initialized system logger")
 syslog.log("System started at " .. systemStartTime .. " on computer " .. os.computerID() .. (os.computerLabel() and "('" .. os.computerLabel() .. "')" or ""))
 syslog.log("Computer host is " .. _HOST)

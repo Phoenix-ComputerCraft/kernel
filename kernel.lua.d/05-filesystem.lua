@@ -47,8 +47,19 @@
     }
 ]]
 
--- This is really unfinished. Please make this work properly.
+-- TODO: This is really unfinished. Please make this work properly.
+
+--- Stores the current mounts as a key-value table of paths to filesystem objects.
 mounts = {}
+
+--- This table contains all filesystem types. Use this to insert more filesystem
+-- types into the system.
+--
+-- A filesystem type has to implement one method for each function in the
+-- filesystem API, with the exception of mounting-related functions and `combine`,
+-- as well as a `new` method that is called with the process, the source device,
+-- and the options table (if present). Paths passed to these methods (outside
+-- `new`) take a relative path to the mountpoint, NOT the absolute path.
 filesystems = {
     craftos = {
         meta = {
@@ -796,6 +807,14 @@ local function getMount(process, path)
     return mounts[maxPath], p, maxPath
 end
 
+--- Opens a file for reading or writing.
+-- @tparam Process process The process to operate as
+-- @tparam string path The file path to open, which may be absolute or relative
+-- to the process's working directory
+-- @tparam string mode The mode to open the file as
+-- @treturn[1] Handle The new file handle
+-- @treturn[2] nil If an error occurred
+-- @treturn[2] string An error message describing why the file couldn't be opened
 function filesystem.open(process, path, mode)
     expect(0, process, "table")
     expect(1, path, "string")
@@ -805,6 +824,11 @@ function filesystem.open(process, path, mode)
     return mount:open(process, p, mode)
 end
 
+--- Returns a list of file names in the directory.
+-- @tparam Process process The process to operate as
+-- @tparam string path The file path to list, which may be absolute or relative
+-- to the process's working directory
+-- @treturn {string} A list of file names present in the directory
 function filesystem.list(process, path)
     expect(0, process, "table")
     expect(1, path, "string")
@@ -812,6 +836,14 @@ function filesystem.list(process, path)
     return mount:list(process, p)
 end
 
+--- Returns a table with information about the selected path.
+-- @tparam Process process The process to operate as
+-- @tparam string path The file path to stat, which may be absolute or relative
+-- to the process's working directory
+-- @treturn[1] table A table with information about the path (see the docs for
+-- the `stat` syscall for more info)
+-- @treturn[2] nil If an error occurred
+-- @treturn[2] string An error message describing why the file couldn't be opened
 function filesystem.stat(process, path)
     expect(0, process, "table")
     expect(1, path, "string")
@@ -819,6 +851,10 @@ function filesystem.stat(process, path)
     return mount:stat(process, p)
 end
 
+--- Removes a file or directory.
+-- @tparam Process process The process to operate as
+-- @tparam string path The file path to remove, which may be absolute or relative
+-- to the process's working directory
 function filesystem.remove(process, path)
     expect(0, process, "table")
     expect(1, path, "string")
@@ -826,6 +862,12 @@ function filesystem.remove(process, path)
     return mount:remove(process, p)
 end
 
+--- Renames (moves) a file or directory.
+-- @tparam Process process The process to operate as
+-- @tparam string path The file path to rename, which may be absolute or relative
+-- to the process's working directory
+-- @tparam The new path the file will be at, which may be in another directory
+-- but must be on the same mountpoint
 function filesystem.rename(process, from, to)
     expect(0, process, "table")
     expect(1, from, "string")
@@ -836,6 +878,10 @@ function filesystem.rename(process, from, to)
     return mountA:rename(process, pA, pB)
 end
 
+--- Creates a new directory and any parent directories.
+-- @tparam Process process The process to operate as
+-- @tparam string path The directory to create, which may be absolute or relative
+-- to the process's working directory
 function filesystem.mkdir(process, path)
     expect(0, process, "table")
     expect(1, path, "string")
@@ -843,6 +889,13 @@ function filesystem.mkdir(process, path)
     return mount:mkdir(process, p)
 end
 
+--- Changes the permissions (mode) of a file or directory for the specified user.
+-- @tparam Process process The process to operate as
+-- @tparam string path The file path to modify, which may be absolute or relative
+-- to the process's working directory
+-- @tparam string|nil user The user to change the permissions for, or `nil` for all users
+-- @tparam number|string|{read = boolean?, write = boolean?, execute = boolean?} mode The
+-- new permissions for the user (see the docs for the `chmod` syscall for more info)
 function filesystem.chmod(process, path, user, mode)
     expect(0, process, "table")
     expect(1, path, "string")
@@ -859,6 +912,11 @@ function filesystem.chmod(process, path, user, mode)
     return mount:chmod(process, p, user, mode)
 end
 
+--- Changes the owner of a file or directory.
+-- @tparam Process process The process to operate as
+-- @tparam string path The file path to modify, which may be absolute or relative
+-- to the process's working directory
+-- @tparam string user The user that will own the file
 function filesystem.chown(process, path, user)
     expect(0, process, "table")
     expect(1, path, "string")
@@ -867,6 +925,12 @@ function filesystem.chown(process, path, user)
     return mount:chown(process, p, user)
 end
 
+--- Mounts a disk device to a path using the specified filesystem and options.
+-- @tparam Process process The process to operate as
+-- @tparam string type The type of filesystem to mount
+-- @tparam string src The source device to mount
+-- @tparam string dest The destination mountpoint
+-- @tparam[opt] table options Any options to pass to the mounter
 function filesystem.mount(process, type, src, dest, options)
     expect(0, process, "table")
     expect(1, type, "string")
@@ -882,6 +946,10 @@ function filesystem.mount(process, type, src, dest, options)
     mounts[fs.combine(dest)] = mount
 end
 
+--- Unmounts a filesystem at a mountpoint.
+-- @tparam Process process The process to operate as
+-- @tparam string path The mountpoint to remove, which may be absolute or relative
+-- to the process's working directory
 function filesystem.unmount(process, path)
     expect(0, process, "table")
     expect(1, path, "string")
@@ -892,6 +960,11 @@ function filesystem.unmount(process, path)
     mounts[fs.combine(path)] = nil
 end
 
+--- Returns the mountpoint for the specified path.
+-- @tparam Process process The process to operate as
+-- @tparam string path The file path to query, which may be absolute or relative
+-- to the process's working directory
+-- @treturn string The absolute path to the mountpoint
 function filesystem.mountpoint(process, path)
     expect(0, process, "table")
     expect(1, path, "string")
@@ -899,6 +972,10 @@ function filesystem.mountpoint(process, path)
     return "/" .. mp
 end
 
+--- Combines the specified path components into a single path.
+-- @tparam string first The first path component
+-- @tparam string ... Any additional path components to add
+-- @treturn string The final combined path
 function filesystem.combine(first, ...)
     local str = fs.combine(first, ...)
     if first:match "^/" then str = "/" .. str end

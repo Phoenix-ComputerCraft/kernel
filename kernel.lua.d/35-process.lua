@@ -52,6 +52,8 @@ local function preempt_hook()
     coroutine.yield("preempt", "test", 7)
 end
 
+--- Finishes a process's resources so it can be removed cleanly.
+-- @tparam Process process The process to reap
 function reap_process(process)
     -- TODO: finish this
     syslog.debug("Reaping process " .. process.id .. " (" .. process.name .. ")")

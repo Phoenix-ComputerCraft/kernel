@@ -1,3 +1,8 @@
+--- Returns a new TTY object.
+-- @tparam table term The CraftOS terminal object to render on
+-- @tparam number width The width of the TTY
+-- @tparam number height The height of the TTY
+-- @treturn TTY The new TTY object
 function terminal.makeTTY(term, width, height)
     local retval = {
         isTTY = true,
@@ -40,6 +45,7 @@ end
 
 do
     local term_width, term_height = term.getSize()
+    --- Stores all virtual TTYs for the main screen.
     TTY = {
         terminal.makeTTY(term, term_width, term_height),
         terminal.makeTTY(term, term_width, term_height),
@@ -51,7 +57,9 @@ do
         terminal.makeTTY(term, term_width, term_height)
     }
 end
+--- Stores the TTY that is currently shown on screen.
 currentTTY = TTY[1]
+--- Stores all TTYs that have been created in user mode.
 terminal.userTTYs = {}
 
 do
@@ -59,6 +67,7 @@ do
     if n then KERNEL.stdout, KERNEL.stderr, KERNEL.stdin = TTY[tonumber(n)], TTY[tonumber(n)], TTY[tonumber(n)] end
 end
 
+--- Stores what modifier keys are currently being held.
 keysHeld = {ctrl = false, alt = false, shift = false}
 
 eventHooks.term_resize = eventHooks.term_resize or {}
@@ -88,7 +97,7 @@ eventHooks.key[#eventHooks.key+1] = function(ev)
             if currentTTY.flags.echo then terminal.write(currentTTY, "\n") terminal.redraw(currentTTY) end
         elseif ev[2] == keys.backspace then
             if currentTTY.flags.cbreak then
-                
+                -- TODO: uh, what is this supposed to be?
             elseif #currentTTY.preBuffer > 0 then
                 currentTTY.preBuffer = currentTTY.preBuffer:sub(1, -2)
                 if currentTTY.flags.echo then terminal.write(currentTTY, "\b \b") terminal.redraw(currentTTY) end
@@ -128,6 +137,9 @@ eventHooks.key_up[#eventHooks.key_up+1] = function(ev)
     elseif ev[2] == keys.leftShift or ev[2] == keys.rightShift then keysHeld.shift = false end
 end
 
+--- Redraws the specified TTY if on-screen.
+-- @tparam TTY tty The TTY to redraw
+-- @tparam boolean full Whether to draw the full screen, or just the changed regions
 function terminal.redraw(tty, full)
     if currentTTY ~= tty and not tty.isMonitor then return end
     local term = tty.term
@@ -186,6 +198,10 @@ function terminal.redraw(tty, full)
     buffer.dirtyLines, buffer.dirtyPalette = {}, {}
 end
 
+--- Resizes the TTY.
+-- @tparam TTY tty The TTY to resize
+-- @tparam number width The new width
+-- @tparam number height The new height
 function terminal.resize(tty, width, height)
     if width > tty.size.width then
         for y = 1, tty.size.height do
@@ -479,6 +495,9 @@ local CSI = {
 }
 for i = 0x70, 0x7F do CSI[string.char(i)] = function(tty, params) end end
 
+--- Writes some text to a TTY's text buffer, allowing ANSI escapes.
+-- @tparam TTY tty The TTY to write to
+-- @tparam string text The text to write
 function terminal.write(tty, text)
     local start, size = 1, 0
     local function commit(x)

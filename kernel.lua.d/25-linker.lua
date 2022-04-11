@@ -49,6 +49,9 @@ local function ar_load(data)
     return retval2
 end
 
+--- Creates a new `package` and `require` set in a global table for the specified process.
+-- @tparam Process process The process to make the functions for
+-- @tparam _G G The global environment to install in
 function createRequire(process, G)
     G.package = {}
     local oldenv = processes[process.parent] and processes[process.parent].env

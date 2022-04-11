@@ -1,4 +1,6 @@
+--- Stores a list of used timers.
 timerMap = {}
+--- Stores a list of used alarms.
 alarmMap = {}
 
 local serviceRegistry = {}
@@ -144,6 +146,7 @@ do
     end
     if not keymap then
         -- Fall back on an O(log n) allocation method
+        --- Stores a mapping of CraftOS keys to Phoenix keycodes.
         keymap = {}
         for i = 1, maxkey do keymap[i] = 0 end
         for i = 1, maxkey do if not keys.getName(i) then keymap[i] = nil end end
