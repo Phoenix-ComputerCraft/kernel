@@ -83,6 +83,20 @@ function hardware.get(path)
     end
 end
 
+--- Returns all devices that match a type.
+-- @tparam string type The type to find
+-- @tparam Device... The device objects that match
+function hardware.find(type)
+    expect(1, type, "string")
+    local found = {}
+    local function traverse(node)
+        for _, v in ipairs(node.drivers) do if v.type == type then found[#found+1] = node break end end
+        for _, v in pairs(node.children) do traverse(v) end
+    end
+    traverse(deviceTreeRoot)
+    return table.unpack(found)
+end
+
 --- Returns the absolute path to a device node.
 -- @tparam Device node The node to lookup
 -- @treturn string The path to the node
@@ -247,13 +261,31 @@ function hardware.broadcast(node, event, param)
     for v in pairs(node.listeners) do v.eventQueue[#v.eventQueue+1] = {event, param} end
 end
 
+--- Calls a method on a device.
+-- @tparam Process process The process to run as
+-- @tparam Device node The node to call on
+-- @tparam string method The method to call
+-- @tparam any ... Any arguments to pass
+-- @treturn any... Any return values from the method
+function hardware.call(process, node, method, ...)
+    for _, driver in ipairs(node.drivers) do if driver.methods[method] then return driver.methods[method](node, process, ...) end end
+    error("No such method", 2)
+end
+
 -- Syscalls
 
 function syscalls.devlookup(process, thread, name)
     expect(1, name, "string")
     local dev = {hardware.get(name)}
     for k, v in ipairs(dev) do dev[k] = hardware.path(v) end
-    return dev
+    return table.unpack(dev)
+end
+
+function syscalls.devfind(process, thread, type)
+    expect(1, type, "string")
+    local dev = {hardware.find(type)}
+    for k, v in ipairs(dev) do dev[k] = hardware.path(v) end
+    return table.unpack(dev)
 end
 
 function syscalls.devinfo(process, thread, device)
@@ -305,8 +337,7 @@ function syscalls.devcall(process, thread, device, method, ...)
     local node = hardware.get(device)
     if not node then error("No such device", 2) end
     if node.process and node.process ~= process.id then error("Device is locked", 2) end
-    for _, driver in ipairs(node.drivers) do if driver.methods[method] then return driver.methods[method](node, process, ...) end end
-    error("No such method", 2)
+    return hardware.call(process, node, method, ...)
 end
 
 function syscalls.devlisten(process, thread, device, state)

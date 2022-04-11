@@ -779,14 +779,47 @@ local peripheralDrivers = {
 drivers.peripheral_modem = {
     name = "peripheral_modem",
     type = "modem",
-    properties = {},
+    properties = {
+        "remainingChannels"
+    },
     methods = {}
 }
 
-drivers.peripheral_modem.methods.open = oneArgMethod "open" ("number")
-drivers.peripheral_modem.methods.isOpen = oneArgMethod "isOpen" ("number")
-drivers.peripheral_modem.methods.close = oneArgMethod "close" ("number")
-drivers.peripheral_modem.methods.closeAll = noArgMethod "closeAll"
+function drivers.peripheral_modem.methods:getRemainingChannels()
+    local num = 128
+    for _ in pairs(self.internalState.modem) do num = num - 1 end
+    return num
+end
+
+function drivers.peripheral_modem.methods:open(process, channel)
+    if not self.internalState.modem[channel] then
+        self.internalState.peripheral.call(self.id, "open", channel)
+        self.internalState.modem[channel] = {}
+    end
+    self.internalState.modem[channel][process] = true
+end
+
+function drivers.peripheral_modem.methods:isOpen(process, channel)
+    return self.internalState.modem[channel] and self.internalState.modem[channel][process]
+end
+
+function drivers.peripheral_modem.methods:close(process, channel)
+    self.internalState.modem[channel][process] = nil
+    if not next(self.internalState.modem[channel]) then
+        self.internalState.peripheral.call(self.id, "close", channel)
+        self.internalState.modem[channel] = nil
+    end
+end
+
+function drivers.peripheral_modem.methods:closeAll(process)
+    for channel = 0, 65535 do
+        self.internalState.modem[channel][process] = nil
+        if not next(self.internalState.modem[channel]) then
+            self.internalState.peripheral.call(self.id, "close", channel)
+            self.internalState.modem[channel] = nil
+        end
+    end
+end
 
 function drivers.peripheral_modem.methods:transmit(process, channel, replyChannel, payload)
     expect(1, channel, "number")
@@ -798,6 +831,7 @@ function drivers.peripheral_modem:init()
     checkCall(self)
     self.metadata.wireless = self.internalState.peripheral.call(self.id, "isWireless")
     self.displayName = (self.metadata.wireless and "Wireless" or "Wired") .. " modem at " .. self.id
+    self.internalState.modem.channels = {}
     if not self.metadata.wireless then
         self.internalState.modem = {}
         self.internalState.modem.callbacks = {}
@@ -825,7 +859,7 @@ eventHooks.modem_message[#eventHooks.modem_message+1] = function(ev)
         syslog.log({level = "notice", module = "Hardware"}, "Received " .. ev[1] .. " event for device ID " .. ev[2] .. ", but no device node was found; ignoring")
         return
     end
-    hardware.broadcast(node, "modem_message", {device = hardware.path(node), channel = ev[3], replyChannel = ev[4], message = ev[5], distance = ev[6]})
+    for v in pairs(node.listeners) do if node.internalState.modem[ev[3]][v] then v.eventQueue[#v.eventQueue+1] = {"modem_message", {device = hardware.path(node), channel = ev[3], replyChannel = ev[4], message = ev[5], distance = ev[6]}} end end
 end
 
 --#endregion
