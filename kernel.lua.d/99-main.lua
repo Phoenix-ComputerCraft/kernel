@@ -160,4 +160,4 @@ while processes[init_pid] do
     terminal.redraw(currentTTY)
 end
 end, debug.traceback)
-if not ok then syslog.log({level = "critical"}, err) end
+if not ok then syslog.log({level = "critical", traceback = true}, err) end

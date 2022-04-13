@@ -306,7 +306,7 @@ function executeThread(process, thread, ev, dead, allWaiting)
             else process.lastReturnValue = {pid = process.id, thread = thread.id, error = process[2], traceback = debug.traceback(thread.coro)} end
             if not params[1] then
                 thread.did_error = true
-                syslog.log({level = "debug", process = process.id, thread = thread.id, category = "Application Error"}, debug.traceback(thread.coro, params[2]))
+                syslog.log({level = _G.args.traceback and "error" or "debug", process = process.id, thread = thread.id, category = "Application Error", traceback = true}, debug.traceback(thread.coro, params[2]))
                 if params[2] and process.stderr and process.stderr.isTTY then terminal.write(process.stderr, params[2] .. "\n") end
             end
             process.threads[thread.id] = nil

@@ -39,6 +39,7 @@ function syscalls.syslog(process, thread, options, ...)
         expect.field(options, "process", "number", "nil")
         expect.field(options, "thread", "number", "nil")
         expect.field(options, "module", "string", "nil")
+        expect.field(options, "traceback", "boolean", "nil")
         if type(options.level) == "string" then
             options.level = lognames[options.level:lower()]
             if not options.level then error("bad field 'level' (invalid name)", 0) end
@@ -160,6 +161,12 @@ function syscalls.syslog(process, thread, options, ...)
     end
     if log.tty and log.tty_level <= options.level then
         if log.tty.isTTY then
+            local str = concat(args, " ", 1, args.n)
+            if log.colorize and options.traceback then
+                str = str:gsub("\t", "  ")
+                         :gsub("([^\n]+):(%d+):", "\27[96m%1\27[37m:\27[95m%2\27[37m:")
+                         :gsub("'([^']+)'\n", "\27[93m'%1'\27[37m\n")
+            end
             terminal.write(log.tty, ("%s[%s]%s %s[%d%s]%s [%s]: %s%s\n"):format(
                 log.colorize and logcolors[options.level] or "",
                 os.date("%b %d %X", options.time / 1000),
@@ -169,7 +176,7 @@ function syscalls.syslog(process, thread, options, ...)
                 options.thread and ":" .. options.thread or "",
                 options.module and " (" .. options.module .. ")" or "",
                 loglevels[options.level],
-                concat(args, " ", 1, args.n),
+                str,
                 log.colorize and "\27[0m" or ""
             ))
             terminal.redraw(log.tty)
@@ -281,7 +288,7 @@ function panic(message)
     syslog.log({level = "panic"}, "Kernel panic:", message)
     if debug then
         local traceback = debug.traceback(nil, 2)
-        syslog.log({level = "panic"}, traceback)
+        syslog.log({level = "panic", traceback = true}, traceback)
     end
     syslog.log({level = "panic"}, "We are hanging here...")
     term.setCursorBlink(false)

@@ -21,7 +21,8 @@ args = {
     quantum = 2000000,
     splitkernpath = "/boot/kernel.lua.d",
     loglevel = 1,
-    console = "tty1"
+    console = "tty1",
+    traceback = true
 }
 
 --- Contains every syscall defined in the kernel.
