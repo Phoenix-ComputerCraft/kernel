@@ -110,8 +110,8 @@ while processes[init_pid] do
         local ev = table.pack(coroutine.yield())
         local name = ev[1]
         if name == "__event_queue_back" then break end
-        if eventHooks[name] then for _, v in ipairs(eventHooks[name]) do v(ev) end end
         local pushedEvent = false
+        if eventHooks[name] then for _, v in ipairs(eventHooks[name]) do pushedEvent = v(ev) or pushedEvent end end
         if eventParameterMap[name] then
             local params = {}
             for i = 2, #eventParameterMap[name] + 1 do

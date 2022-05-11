@@ -103,11 +103,20 @@ function syscalls.chdir(process, thread, dir)
     return true
 end
 
+function syscalls.getuser(process, thread)
+    return process.user
+end
+
+function syscalls.setuser(process, thread, user)
+    expect(1, user, "string")
+    if process.user ~= "root" then error("Permission denied") end
+    process.user = user
+end
+
 function syscalls.fork(process, thread, func, name, ...)
     expect(1, func, "function")
     expect(2, name, "string", "nil")
     local id = #processes + 1
-    local p
     processes[id] = {
         id = id,
         name = name or process.name,
@@ -137,9 +146,9 @@ function syscalls.fork(process, thread, func, name, ...)
             end,
             [13] = function() return coroutine.yield("syscall", "exit", 1) end,
             [15] = function() return coroutine.yield("syscall", "exit", 1) end,
-            [19] = function() p.paused = true end,
-            [21] = function() p.paused = true end,
-            [22] = function() p.paused = true end,
+            [19] = function() return coroutine.yield("syscall", "suspend") end,
+            [21] = function() return coroutine.yield("syscall", "suspend") end,
+            [22] = function() return coroutine.yield("syscall", "suspend") end,
         },
         paused = false,
         threads = {
@@ -153,7 +162,6 @@ function syscalls.fork(process, thread, func, name, ...)
             }
         }
     }
-    p = processes[id]
     processes[id].env = mkenv(processes[id])
     setfenv(func, processes[id].env)
     if process.stdin and process.stdin.isTTY then
@@ -185,6 +193,7 @@ function syscalls.exec(process, thread, path, ...)
     file.close()
     local stat = filesystem.stat(process, path)
     if not (stat.permissions[stat.owner] or stat.worldPermissions).execute then error("Could not execute file: Permission denied", 0) end
+    if stat.setuser then process.user = stat.owner end
     if contents:sub(1, 2) == "#!" then
         local command = contents:sub(3, contents:find("\n") - 1)
         local args, i = {}, 0
@@ -271,4 +280,8 @@ function syscalls.getpinfo(process, thread, pid)
         systime = p.systime or 0,
         threads = threads,
     }
+end
+
+function syscalls.suspend(process, thread)
+    process.paused = true
 end

@@ -59,7 +59,7 @@ local deviceListeners = {}
 
 --- Returns all devices that match a path specifier.
 -- @tparam string path The path to query
--- @tparam Device... The device objects that match
+-- @treturn Device... The device objects that match
 function hardware.get(path)
     expect(1, path, "string")
     if path:find("^%x+%-%x+%-%x+%-%x+%-%x+$") then return deviceUUIDs[path]
@@ -85,7 +85,7 @@ end
 
 --- Returns all devices that match a type.
 -- @tparam string type The type to find
--- @tparam Device... The device objects that match
+-- @treturn Device... The device objects that match
 function hardware.find(type)
     expect(1, type, "string")
     local found = {}

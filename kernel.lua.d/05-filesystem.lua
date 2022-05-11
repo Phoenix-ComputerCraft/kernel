@@ -47,8 +47,6 @@
     }
 ]]
 
--- TODO: This is really unfinished. Please make this work properly.
-
 --- Stores the current mounts as a key-value table of paths to filesystem objects.
 mounts = {}
 
@@ -69,7 +67,8 @@ filesystems = {
                 permissions = {
                     root = {read = true, write = true, execute = true}
                 },
-                worldPermissions = {read = true, write = false, execute = true}
+                worldPermissions = {read = true, write = false, execute = true},
+                setuser = false
             },
             contents = {}
         }
@@ -127,7 +126,8 @@ function filesystems.craftos:setmeta(user, path, meta)
                     permissions = {
                         root = {read = true, write = true, execute = true}
                     },
-                    worldPermissions = {read = true, write = false, execute = true}
+                    worldPermissions = {read = true, write = false, execute = true},
+                    setuser = false
                 },
                 contents = {}
             } end
@@ -141,7 +141,8 @@ function filesystems.craftos:setmeta(user, path, meta)
         type = meta.type,
         owner = meta.owner,
         permissions = meta.permissions,
-        worldPermissions = meta.worldPermissions
+        worldPermissions = meta.worldPermissions,
+        setuser = false
     }
     if meta.type ~= "directory" then t.contents = nil end
     local file = fs.open("/meta.ltn", "w")
@@ -178,7 +179,8 @@ function filesystems.craftos:open(process, path, mode)
                 type = "file",
                 owner = process.user,
                 permissions = deepcopy(pstat.permissions),
-                worldPermissions = deepcopy(pstat.worldPermissions)
+                worldPermissions = deepcopy(pstat.worldPermissions),
+                setuser = false
             }
             -- We do a swap here so it doesn't break if pstat.owner == process.user
             local t = meta.permissions[pstat.owner]
@@ -210,6 +212,7 @@ function filesystems.craftos:stat(process, path)
     attr.type = attr.isDir and "directory" or "file"
     attr.special = {}
     attr.isDir = nil
+    if not attr.modified then attr.modified = attr.modification end
     attr.modification = nil
     if attr.isReadOnly then
         -- If the file is read-only, it's from the ROM so permissions can't be set
@@ -226,12 +229,14 @@ function filesystems.craftos:stat(process, path)
         attr.permissions = deepcopy(meta.permissions)
         attr.worldPermissions = deepcopy(meta.worldPermissions)
         attr.type = meta.type or attr.type
+        attr.setuser = meta.setuser
     else
         attr.owner = "root" -- all files are root-owned by default
         attr.permissions = {
             root = {read = true, write = true, execute = true}
         }
         attr.worldPermissions = {read = true, write = false, execute = true}
+        attr.setuser = false
     end
     return attr
 end
@@ -323,33 +328,39 @@ function filesystems.craftos:chmod(process, path, user, mode)
         end
     end
     if type(mode) == "string" then
-        if mode:match "^[+-=][rwx]+$" then
+        if mode:match "^[+-=][rwxs]+$" then
             local m = mode:sub(1, 1)
             local t = {}
-            for c in mode:gmatch("[rwx]") do
+            for c in mode:gmatch("[rwxs]") do
                 if c == "r" then t.read = true
                 elseif c == "w" then t.write = true
+                elseif c == "s" then t.setuser = true
                 else t.execute = true end
             end
             if m == "+" then
                 if t.read then perms.read = true end
                 if t.write then perms.write = true end
                 if t.execute then perms.execute = true end
+                if t.setuser then stat.setuser = true end
             elseif m == "-" then
                 if t.read then perms.read = false end
                 if t.write then perms.write = false end
                 if t.execute then perms.execute = false end
+                if t.setuser then stat.setuser = false end
             else
                 perms.read = t.read or false
                 perms.write = t.write or false
                 perms.execute = t.execute or false
+                stat.setuser = t.setuser or false
             end
         else
             perms.read = mode:sub(1, 1) ~= "-"
             perms.write = mode:sub(2, 2) ~= "-"
             perms.execute = mode:sub(3, 3) ~= "-"
+            stat.setuser = mode:sub(3, 3) == "s"
         end
     elseif type(mode) == "number" then
+        stat.setuser = bit32.band(mode, 8)
         perms.read = bit32.band(mode, 4)
         perms.write = bit32.band(mode, 2)
         perms.execute = bit32.band(mode, 1)
@@ -357,6 +368,7 @@ function filesystems.craftos:chmod(process, path, user, mode)
         if mode.read ~= nil then perms.read = mode.read end
         if mode.write ~= nil then perms.write = mode.write end
         if mode.execute ~= nil then perms.execute = mode.execute end
+        if mode.setuser ~= nil then stat.setuser = mode.setuser end
     end
     self:setmeta(process.user, fs.combine(self.path, path), deepcopy(stat))
 end
@@ -401,6 +413,7 @@ function filesystems.tmpfs:setpath(user, path, data)
             owner = t.owner,
             permissions = deepcopy(t.permissions),
             worldPermissions = deepcopy(t.worldPermissions),
+            setuser = false,
             created = os.epoch "utc",
             modified = os.epoch "utc",
             contents = {}
@@ -423,6 +436,7 @@ function filesystems.tmpfs:new(process, src, options)
             [process.user] = {read = true, write = true, execute = true}
         },
         worldPermissions = {read = true, write = false, execute = true},
+        setuser = false,
         created = os.epoch "utc",
         modified = os.epoch "utc",
         contents = {}
@@ -598,6 +612,7 @@ function filesystems.tmpfs:open(process, path, mode)
                 owner = process.user,
                 permissions = deepcopy(pstat.permissions),
                 worldPermissions = deepcopy(pstat.worldPermissions),
+                setuser = false,
                 created = os.epoch "utc",
                 modified = os.epoch "utc",
                 data = ""
@@ -638,6 +653,7 @@ function filesystems.tmpfs:stat(process, path)
         owner = data.owner,
         permissions = deepcopy(data.permissions),
         worldPermissions = deepcopy(data.worldPermissions),
+        setuser = data.setuser,
         special = {}
     }
 end
@@ -719,33 +735,39 @@ function filesystems.tmpfs:chmod(process, path, user, mode)
         end
     end
     if type(mode) == "string" then
-        if mode:match "^[+-=][rwx]+$" then
+        if mode:match "^[+-=][rwxs]+$" then
             local m = mode:sub(1, 1)
             local t = {}
-            for c in mode:gmatch("[rwx]") do
+            for c in mode:gmatch("[rwxs]") do
                 if c == "r" then t.read = true
                 elseif c == "w" then t.write = true
+                elseif c == "s" then t.setuser = true
                 else t.execute = true end
             end
             if m == "+" then
                 if t.read then perms.read = true end
                 if t.write then perms.write = true end
                 if t.execute then perms.execute = true end
+                if t.setuser then stat.setuser = true end
             elseif m == "-" then
                 if t.read then perms.read = false end
                 if t.write then perms.write = false end
                 if t.execute then perms.execute = false end
+                if t.setuser then stat.setuser = false end
             else
                 perms.read = t.read or false
                 perms.write = t.write or false
                 perms.execute = t.execute or false
+                stat.setuser = t.setuser or false
             end
         else
             perms.read = mode:sub(1, 1) ~= "-"
             perms.write = mode:sub(2, 2) ~= "-"
             perms.execute = mode:sub(3, 3) ~= "-"
+            stat.setuser = mode:sub(3, 3) == "s"
         end
     elseif type(mode) == "number" then
+        stat.setuser = bit32.band(mode, 8)
         perms.read = bit32.band(mode, 4)
         perms.write = bit32.band(mode, 2)
         perms.execute = bit32.band(mode, 1)
@@ -753,6 +775,7 @@ function filesystems.tmpfs:chmod(process, path, user, mode)
         if mode.read ~= nil then perms.read = mode.read end
         if mode.write ~= nil then perms.write = mode.write end
         if mode.execute ~= nil then perms.execute = mode.execute end
+        if mode.setuser ~= nil then stat.setuser = mode.setuser end
     end
     --self:setpath(process.user, fs.combine(self.path, path), deepcopy(stat)) -- may not be needed?
 end
@@ -766,27 +789,12 @@ function filesystems.tmpfs:chown(process, path, owner)
 end
 
 -- drivefs implementation
--- drivefs just inherits from craftos, but automatically locates drive mounts from sides.
+-- drivefs just inherits from craftos, but automatically locates drive mounts from hardware devices.
 
 function filesystems.drivefs:new(process, src, options)
-    local path
-    if peripheral.isPresent(src) then
-        if peripheral.getType(src) == "drive" then
-            if peripheral.call(src, "isDiskPresent") then path = peripheral.call(src, "getMountPath")
-            else error("Drive has no disk inserted", 2) end
-        else error("Peripheral is not a drive", 2) end
-    else
-        for _, v in ipairs(redstone.getSides()) do
-            if peripheral.getType(v) == "modem" and not peripheral.call(v, "isWireless") and peripheral.call(v, "isPresentRemote", src) then
-                if peripheral.call(v, "getTypeRemote", src) == "drive" then
-                    if peripheral.call(v, "callRemote", src, "isDiskPresent") then path = peripheral.call(v, "callRemote", src, "getMountPath") break
-                    else error("Drive has no disk inserted", 2) end
-                else error("Peripheral is not a drive", 2) end
-            end
-        end
-    end
-    if not path then error("Could not find drive at " .. src, 2) end
-    return filesystems.craftos:new(process, path, options)
+    local drive = hardware.get(src)
+    if not drive then error("Could not find drive at " .. src) end
+    return filesystems.craftos:new(process, hardware.call(process, drive, "getMountPath"), options)
 end
 
 -- Syscalls
@@ -847,8 +855,10 @@ end
 function filesystem.stat(process, path)
     expect(0, process, "table")
     expect(1, path, "string")
-    local mount, p = getMount(process, path)
-    return mount:stat(process, p)
+    local mount, p, mp = getMount(process, path)
+    local res, err = mount:stat(process, p)
+    if res then res.mountpoint = "/" .. mp end
+    return res, err
 end
 
 --- Removes a file or directory.
@@ -960,18 +970,6 @@ function filesystem.unmount(process, path)
     mounts[fs.combine(path)] = nil
 end
 
---- Returns the mountpoint for the specified path.
--- @tparam Process process The process to operate as
--- @tparam string path The file path to query, which may be absolute or relative
--- to the process's working directory
--- @treturn string The absolute path to the mountpoint
-function filesystem.mountpoint(process, path)
-    expect(0, process, "table")
-    expect(1, path, "string")
-    local _, _, mp = getMount(process, path)
-    return "/" .. mp
-end
-
 --- Combines the specified path components into a single path.
 -- @tparam string first The first path component
 -- @tparam string ... Any additional path components to add
@@ -992,7 +990,6 @@ function syscalls.chmod(process, thread, ...) return filesystem.chmod(process, .
 function syscalls.chown(process, thread, ...) return filesystem.chown(process, ...) end
 function syscalls.mount(process, thread, ...) return filesystem.mount(process, ...) end
 function syscalls.unmount(process, thread, ...) return filesystem.unmount(process, ...) end
-function syscalls.mountpoint(process, thread, ...) return filesystem.mountpoint(process, ...) end
 function syscalls.combine(process, thread, ...) return filesystem.combine(...) end
 
 -- This syscall provides CraftOS APIs (and modules) without having to mount the entire ROM.

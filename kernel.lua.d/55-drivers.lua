@@ -24,7 +24,7 @@ local localPeripherals = {top = true, bottom = true, left = true, right = true, 
 
 local drivers = {}
 
-local function getNodeById(name)
+function getNodeById(name)
     if localPeripherals[name] then
         if deviceTreeRoot.children[name] then
             return deviceTreeRoot.children[name]
@@ -188,6 +188,8 @@ function drivers.root:init()
         d.internalState.redstone = {side = v}
         hardware.register(d, drivers.root_redstone)
     end
+    hardware.register(hardware.add(deviceTreeRoot, "lo"), drivers.loopback_modem)
+    registerLoopback()
     for v in pairs(localPeripherals) do
         if peripheral.isPresent(v) then
             hardware.add(self, v)
@@ -203,6 +205,7 @@ function drivers.root:deinit()
             hardware.remove(self.children[v])
         end
     end
+    hardware.remove(hardware.get("/lo"))
     hardware.remove(hardware.get("/redstone"))
 end
 
@@ -831,9 +834,10 @@ function drivers.peripheral_modem:init()
     checkCall(self)
     self.metadata.wireless = self.internalState.peripheral.call(self.id, "isWireless")
     self.displayName = (self.metadata.wireless and "Wireless" or "Wired") .. " modem at " .. self.id
+    self.internalState.modem = {}
     self.internalState.modem.channels = {}
+    self.internalState.peripheral.call(self.id, "closeAll")
     if not self.metadata.wireless then
-        self.internalState.modem = {}
         self.internalState.modem.callbacks = {}
         for _, v in ipairs(peripheralDrivers) do
             local f = peripheralTypeCallback(v, v.type)
@@ -854,12 +858,72 @@ register "modem"
 
 eventHooks.modem_message = eventHooks.modem_message or {}
 eventHooks.modem_message[#eventHooks.modem_message+1] = function(ev)
-    local node = getNodeById(ev[2])
+    local node = getNodeById(ev[2]) or hardware.get(ev[2])
     if not node then
         syslog.log({level = "notice", module = "Hardware"}, "Received " .. ev[1] .. " event for device ID " .. ev[2] .. ", but no device node was found; ignoring")
         return
     end
-    for v in pairs(node.listeners) do if node.internalState.modem[ev[3]][v] then v.eventQueue[#v.eventQueue+1] = {"modem_message", {device = hardware.path(node), channel = ev[3], replyChannel = ev[4], message = ev[5], distance = ev[6]}} end end
+    local retval = false
+    for v in pairs(node.listeners) do if node.internalState.modem[ev[3]][v] then v.eventQueue[#v.eventQueue+1], retval = {"modem_message", {device = hardware.path(node), channel = ev[3], replyChannel = ev[4], message = ev[5], distance = ev[6]}}, true end end
+    return retval
+end
+
+--#endregion
+--#region Loopback modem
+
+drivers.loopback_modem = {
+    name = "loopback_modem",
+    type = "modem",
+    properties = {
+        "remainingChannels"
+    },
+    methods = {}
+}
+
+function drivers.loopback_modem.methods:getRemainingChannels()
+    local num = 128
+    for _ in pairs(self.internalState.modem) do num = num - 1 end
+    return num
+end
+
+function drivers.loopback_modem.methods:open(process, channel)
+    if not self.internalState.modem[channel] then
+        self.internalState.modem[channel] = {}
+    end
+    self.internalState.modem[channel][process] = true
+end
+
+function drivers.loopback_modem.methods:isOpen(process, channel)
+    return self.internalState.modem[channel] and self.internalState.modem[channel][process]
+end
+
+function drivers.loopback_modem.methods:close(process, channel)
+    self.internalState.modem[channel][process] = nil
+    if not next(self.internalState.modem[channel]) then
+        self.internalState.modem[channel] = nil
+    end
+end
+
+function drivers.loopback_modem.methods:closeAll(process)
+    for channel = 0, 65535 do
+        self.internalState.modem[channel][process] = nil
+        if not next(self.internalState.modem[channel]) then
+            self.internalState.modem[channel] = nil
+        end
+    end
+end
+
+function drivers.loopback_modem.methods:transmit(process, channel, replyChannel, payload)
+    expect(1, channel, "number")
+    replyChannel = expect(2, replyChannel, "number", "nil") or channel
+    os.queueEvent("modem_message", self.uuid, channel, replyChannel, payload, 0)
+end
+
+function drivers.loopback_modem:init()
+    self.metadata.wireless = true
+    self.displayName = "Loopback modem"
+    self.internalState.modem = {}
+    self.internalState.modem.channels = {}
 end
 
 --#endregion

@@ -1,5 +1,69 @@
 local do_syscall = do_syscall
 local expect = expect
+
+local function mult64on32(ah, al, bh, bl)
+    local a = {bit32.extract(al, 0, 16), bit32.extract(al, 16, 16), bit32.extract(ah, 0, 16), bit32.extract(ah, 16, 16)}
+    local b = {bit32.extract(bl, 0, 16), bit32.extract(bl, 16, 16), bit32.extract(bh, 0, 16), bit32.extract(bh, 16, 16)}
+    local partial = {{0, 0, 0, 0, 0}, {0, 0, 0, 0, 0}, {0, 0, 0, 0, 0}, {0, 0, 0, 0, 0}}
+    for bi = 1, 4 do
+        for ai = 1, 4 do
+            local n = a[ai] * b[bi] + partial[bi][ai]
+            partial[bi][ai+1], partial[bi][ai] = bit32.rshift(n, 16), bit32.band(n, 0xFFFF)
+        end
+    end
+    local q = {0, 0, 0, 0, 0, 0, 0, 0}
+    for col = 1, 8 do
+        for row = 1, 4 do q[col] = q[col] + (partial[row][col-row+1] or 0) end
+        q[col+1], q[col] = bit32.rshift(q[col], 16), bit32.band(q[col], 0xFFFF)
+    end
+    return q[3] + q[4] * 0x10000, q[1] + q[2] * 0x10000
+end
+local function add64with32(b, ah, al)
+    return ah + math.floor((al + b) / 0x100000000), bit32.band(al + b, 0xFFFFFFFF)
+end
+
+function makeRandom()
+    local random_state_h, random_state_l = 0, 0
+    local function next(bits)
+        random_state_h, random_state_l = add64with32(0xB, mult64on32(random_state_h, random_state_l, 0x5, 0xDEECE66D))
+        random_state_h = bit32.band(random_state_h, 0xFFFF)
+        return math.floor(random_state_h / 2^(16-bits)) + math.floor(random_state_l / 2^(48-bits))
+    end
+    local function random(min, max)
+        expect(1, min, "number", "nil")
+        expect(2, max, "number", "nil")
+        if min then
+            expect.range(min, 0, 0x7FFFFFFF)
+            if not max then min, max = 0, min
+            else expect.range(max, 0, 0x7FFFFFFF) end
+            local bound = max - min
+            local rand
+            if math.log(bound, 2) % 1 == 0 then rand = bit32.rshift((bound * next(31)), 31)
+            else
+                local bits
+                repeat
+                    bits = next(31)
+                    rand = bits % bound
+                until bits - rand + (bound-1) >= 0
+            end
+            return rand + min
+        else return (next(26) * 0x8000000 + next(27)) / 0x20000000000000 end
+    end
+    local function randomseed(seed)
+        expect(1, seed, "number")
+        random_state_h, random_state_l = bit32.band(bit32.bxor(0x5, math.floor(seed / 0x100000000)), 0xFFFF), bit32.bxor(0xDEECE66D, math.floor(seed))
+    end
+    randomseed(os.epoch "utc" * tonumber(tostring(next):match("%x+") or "1", 16))
+    return random, randomseed
+end
+
+do
+    -- PUC Lua's default randomizer is crap, so we're installing a custom one in the kernel as well.
+    -- This gives us better precision for randomization on those systems.
+    -- (This has no visible effect on Cobalt-based CC, as it uses the same algorithm.)
+    math.random, math.randomseed = makeRandom()
+end
+
 --- Creates a new global table with a Lua 5.2 standard library installed.
 -- @tparam Process process The process to generate for
 -- @treturn _G A new global table for the process
@@ -8,6 +72,8 @@ function createLuaLib(process)
     for _,v in ipairs{"assert", "error", "getfenv", "getmetatable", "ipairs", "next",
         "pairs", "pcall", "rawequal", "rawget", "rawset", "select", "setfenv",
         "setmetatable", "tonumber", "tostring", "type", "_VERSION", "xpcall"} do G[v] = _G[v] end
+
+    -- TODO: update the below notice since we can just localize globals we need (!)
 
     -- We can't use any kernel-level globals like `expect` here, so argument checks will be manual.
     -- Normally using upvalues wouldn't be allowed either, but dbprotect blocks access so it should be alright.
@@ -71,20 +137,7 @@ function createLuaLib(process)
     -- The default math.random uses a global seed which cannot be shared between processes,
     -- so we need to implement our own randomizer.
 
-    local random_state = 0
-    function G.math.random(min, max)
-        expect(1, min, "number", "nil")
-        expect(2, max, "number", "nil")
-        random_state = (1103515245 * random_state + 12345) % 0x80000000
-        local rand = random_state / 0x7FFFFFFF
-        if max then return math.floor(rand * (math.floor(max) - math.floor(min))) + min
-        elseif min then return math.floor(rand * math.floor(max))
-        else return rand end
-    end
-    function G.math.randomseed(seed)
-        expect(1, seed, "number")
-        random_state = math.floor(seed) % 0x80000000
-    end
+    G.math.random, G.math.randomseed = makeRandom()
 
     local oldcreate = coroutine.create
     local sethook = debug.sethook
@@ -104,6 +157,7 @@ function createLuaLib(process)
         end,
         read = function(self, fmt, ...)
             local s, e
+            fmt = fmt or "*l"
             if type(fmt) == "number" then while #stdin_buffer < fmt do stdin_buffer = stdin_buffer .. do_syscall("read", fmt) end
             elseif type(fmt) == "string" then
                 fmt = fmt:gsub("^%*", "")
@@ -431,7 +485,7 @@ function createLuaLib(process)
         time = function(t)
             expect(1, t, "table", "nil")
             if t then return oldos.time(t)
-            else return oldos.epoch "utc" end
+            else return oldos.epoch "utc" / 1000 end
         end,
         tmpname = function()
             local name = "/tmp/lua_"
