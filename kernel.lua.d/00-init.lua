@@ -772,7 +772,7 @@ end
 -- @treturn any The new copied value
 function deepcopy(tab)
     if type(tab) == "table" then
-        local retval = setmetatable({}, getmetatable(tab))
+        local retval = setmetatable({}, deepcopy(getmetatable(tab)))
         for k,v in pairs(tab) do retval[deepcopy(k)] = deepcopy(v) end
         return retval
     else return tab end
@@ -943,7 +943,9 @@ do
     local n_getfenv, n_setfenv, d_getfenv, getlocal, getupvalue, d_setfenv, setlocal, setupvalue, upvaluejoin =
         getfenv, setfenv, debug.getfenv, debug.getlocal, debug.getupvalue, debug.setfenv, debug.setlocal, debug.setupvalue, debug.upvaluejoin
 
-    local error, getinfo, running, select, setmetatable, type = error, debug.getinfo, coroutine.running, select, setmetatable, type
+    local error, getinfo, running, select, setmetatable, type, tonumber = error, debug.getinfo, coroutine.running, select, setmetatable, type, tonumber
+
+    local superprotected
 
     local function keys(t, v, ...)
         if v then t[v] = true end
@@ -951,18 +953,32 @@ do
         else return t end
     end
 
+    local function superprotect(v, ...)
+        if select("#", ...) > 0 then return superprotected[v or ""] or v, superprotect(...)
+        else return superprotected[v or ""] or v end
+    end
+
+    function debug.getinfo(thread, func, what)
+        if type(thread) ~= "thread" then what, func, thread = func, thread, running() end
+        local retval
+        if tonumber(func) then retval = getinfo(thread, func+1, what)
+        else retval = getinfo(thread, func, what) end
+        if retval and retval.func then retval.func = superprotected[retval.func] or retval.func end
+        return retval
+    end
+
     function debug.getlocal(thread, level, loc)
         if loc == nil then loc, level, thread = level, thread, running() end
         if type(level) == "function" then
             local caller = getinfo(2, "f")
             if protectedObjects[level] and not (caller and protectedObjects[level][caller.func]) then return nil end
-            return getlocal(level, loc)
-        elseif type(level) == "number" then
+            return superprotect(getlocal(level, loc))
+        elseif tonumber(level) then
             local info = getinfo(thread, level + 1, "f")
             local caller = getinfo(2, "f")
             if info and protectedObjects[info.func] and not (caller and protectedObjects[info.func][caller.func]) then return nil end
-            return getlocal(thread, level + 1, loc)
-        else return getlocal(thread, level, loc) end
+            return superprotect(getlocal(thread, level + 1, loc))
+        else return superprotect(getlocal(thread, level, loc)) end
     end
 
     function debug.getupvalue(func, up)
@@ -970,12 +986,12 @@ do
             local caller = getinfo(2, "f")
             if protectedObjects[func] and not (caller and protectedObjects[func][caller.func]) then return nil end
         end
-        return getupvalue(func, up)
+        return superprotect(getupvalue(func, up))
     end
 
     function debug.setlocal(thread, level, loc, value)
         if loc == nil then loc, level, thread = level, thread, running() end
-        if type(level) == "number" then
+        if tonumber(level) then
             local info = getinfo(thread, level + 1, "f")
             local caller = getinfo(2, "f")
             if info and protectedObjects[info.func] and not (caller and protectedObjects[info.func][caller.func]) then error("attempt to set local of protected function", 2) end
@@ -993,7 +1009,7 @@ do
 
     function _G.getfenv(f)
         if f == nil then return n_getfenv(2)
-        elseif type(f) == "number" and f > 0 then
+        elseif tonumber(f) and tonumber(f) > 0 then
             local info = getinfo(f + 1, "f")
             local caller = getinfo(2, "f")
             if info and protectedObjects[info.func] and not (caller and protectedObjects[info.func][caller.func]) then return nil end
@@ -1006,7 +1022,7 @@ do
     end
 
     function _G.setfenv(f, tab)
-        if type(f) == "number" then
+        if tonumber(f) then
             local info = getinfo(f + 1, "f")
             local caller = getinfo(2, "f")
             if info and protectedObjects[info.func] and not (caller and protectedObjects[info.func][caller.func]) then error("attempt to set environment of protected function", 2) end
@@ -1049,19 +1065,36 @@ do
 
     function debug.protect(func, ...)
         if type(func) ~= "function" then error("bad argument #1 (expected function, got " .. type(func) .. ")", 2) end
+        if protectedObjects[func] then error("attempt to protect a protected function", 2) end
         protectedObjects[func] = keys(setmetatable({}, {__mode = "k"}), func, ...)
     end
+
+    superprotected = {
+        [n_getfenv] = _G.getfenv,
+        [n_setfenv] = _G.setfenv,
+        [d_getfenv] = debug.getfenv,
+        [d_setfenv] = debug.setfenv,
+        [getlocal] = debug.getlocal,
+        [setlocal] = debug.setlocal,
+        [getupvalue] = debug.getupvalue,
+        [setupvalue] = debug.setupvalue,
+        [upvaluejoin] = debug.upvaluejoin,
+        [getinfo] = debug.getinfo,
+        [superprotect] = function() end,
+    }
 
     protectedObjects = keys(setmetatable({}, {__mode = "k"}),
         getfenv,
         setfenv,
         debug.getfenv,
-        debug.getlocal,
-        debug.getupvalue,
         debug.setfenv,
+        debug.getlocal,
         debug.setlocal,
+        debug.getupvalue,
         debug.setupvalue,
         debug.upvaluejoin,
+        debug.getinfo,
+        superprotect,
         debug.protect
     )
     for k,v in pairs(protectedObjects) do protectedObjects[k] = {[k] = v} end

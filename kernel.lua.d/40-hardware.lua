@@ -75,7 +75,7 @@ function hardware.get(path)
         -- Search the entire tree for objects with the specified name (slow!)
         local matches = {}
         local function search(node)
-            if node.id == path then matches[#matches+1] = node end
+            if node.id == path or node.alias == path then matches[#matches+1] = node end
             for _, v in pairs(node.children) do search(v) end
         end
         search(deviceTreeRoot)
@@ -297,11 +297,20 @@ function syscalls.devinfo(process, thread, device)
     return {
         id = node.id,
         uuid = node.uuid,
+        alias = node.alias,
         parent = node.parent and hardware.path(node.parent) or "/",
         displayName = node.displayName,
         types = types,
         metadata = deepcopy(node.metadata)
     }
+end
+
+function syscalls.devalias(process, thread, device, alias)
+    expect(1, device, "string")
+    expect(2, alias, "string", "nil")
+    local node = hardware.get(device)
+    if not node then error("No such device", 2) end
+    node.alias = alias
 end
 
 function syscalls.devmethods(process, thread, device)

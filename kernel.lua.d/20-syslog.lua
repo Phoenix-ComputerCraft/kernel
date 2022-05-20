@@ -22,10 +22,10 @@ local loglevels = {
 local lognames = {}
 for i = 0, #loglevels do lognames[loglevels[i]:lower()] = i end
 
-local logcolors = {[0] = '\27[90m', '\27[97m', '\27[37m', '\27[93m', '\27[31m', '\27[95m', '\27[96m'}
+local logcolors = {[0] = '\27[90m', '\27[97m', '\27[36m', '\27[93m', '\27[31m', '\27[95m', '\27[96m'}
 
 local function concat(t, sep, i, j)
-    if i == j then return tostring(t[i])
+    if i >= j then return tostring(t[i])
     else return tostring(t[i]) .. sep .. concat(t, sep, i + 1, j) end
 end
 
@@ -184,10 +184,7 @@ function syscalls.syslog(process, thread, options, ...)
     end
 end
 
--- TODO: make a final decision on whether non-root users can create logs
-
 function syscalls.mklog(process, thread, name, streamed, path)
-    if process.user ~= "root" then error("Permission denied", 0) end
     expect(1, name, "string")
     expect(2, streamed, "boolean", "nil")
     expect(3, path, "string", "nil")
@@ -205,7 +202,6 @@ function syscalls.mklog(process, thread, name, streamed, path)
 end
 
 function syscalls.rmlog(process, thread, name)
-    if process.user ~= "root" then error("Permission denied", 0) end
     expect(1, name, "string")
     if name == "default" then error("Cannot delete default log", 0) end
     if not syslogs[name] then error("Log does not exist", 0) end

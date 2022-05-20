@@ -47,6 +47,8 @@
     }
 ]]
 
+-- TODO: Add disk space metrics
+
 --- Stores the current mounts as a key-value table of paths to filesystem objects.
 mounts = {}
 
