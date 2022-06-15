@@ -36,7 +36,7 @@ function makeRandom()
             expect.range(min, 0, 0x7FFFFFFF)
             if not max then min, max = 0, min
             else expect.range(max, 0, 0x7FFFFFFF) end
-            local bound = max - min
+            local bound = max - min + 1
             local rand
             if math.log(bound, 2) % 1 == 0 then rand = bit32.rshift((bound * next(31)), 31)
             else
@@ -79,8 +79,8 @@ function createLuaLib(process)
     -- Normally using upvalues wouldn't be allowed either, but dbprotect blocks access so it should be alright.
 
     function G.dofile(path)
-        if type(path) ~= "string" then error("bad argument #1 (expected string, got " .. type(path) .. ")", 2) end
-        local fn, err = loadfile(path, nil, _G)
+        if path ~= nil and type(path) ~= "string" then error("bad argument #1 (expected string, got " .. type(path) .. ")", 2) end
+        local fn, err = loadfile(path or io.stdin:read("*a"), nil, _G)
         if not fn then error(err, 2) end
         return fn()
     end

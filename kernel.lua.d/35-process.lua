@@ -183,14 +183,20 @@ end
 
 function syscalls.exec(process, thread, path, ...)
     expect(1, path, "string")
-    local file, err = filesystem.open(process, path, "rb")
+    local file, err = filesystem.open(process, path, "r")
     if not file then
         path = path .. ".lua"
-        file, err = filesystem.open(process, path, "rb")
+        file, err = filesystem.open(process, path, "r")
         if not file then error("Could not open file: " .. err, 0) end
     end
     local contents = file.readAll()
     file.close()
+    if contents:match("\x1bLua") then
+        file, err = filesystem.open(process, path, "rb")
+        if not file then error("Could not open file: " .. err, 0) end
+        contents = file.readAll()
+        file.close()
+    end
     local stat = filesystem.stat(process, path)
     if not (stat.permissions[stat.owner] or stat.worldPermissions).execute then error("Could not execute file: Permission denied", 0) end
     if stat.setuser then process.user = stat.owner end

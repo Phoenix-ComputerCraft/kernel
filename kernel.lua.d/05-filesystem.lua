@@ -189,13 +189,13 @@ function filesystems.craftos:open(process, path, mode)
             meta.permissions[pstat.owner] = nil
             meta.permissions[process.user] = t
             self:setmeta(process.user, fs.combine(self.path, path), meta)
-            return fs.open(fs.combine(self.path, path), mode)
+            return setmetatable(fs.open(fs.combine(self.path, path), mode), {__name = "file"})
         else return nil, "File not found" end
     elseif stat.type == "directory" then return nil, "Is a directory" end
     local perms = stat.permissions[process.user] or stat.worldPermissions
     --syslog.debug(path, mode, perms.read, perms.write, perms.execute)
     if (mode:sub(1, 1) == "r" and not perms.read) or ((mode:sub(1, 1) == "w" or mode:sub(1, 1) == "a") and not perms.write) then return nil, "Permission denied" end
-    return fs.open(fs.combine(self.path, path), mode)
+    return setmetatable(fs.open(fs.combine(self.path, path), mode), {__name = "file"})
 end
 
 function filesystems.craftos:list(process, path)
@@ -450,7 +450,7 @@ function filesystems.tmpfs:_open_internal(user, path, mode)
     local closed = false
     local function setenv(t)
         for _, v in pairs(t) do setfenv(v, process.env) debug.protect(v) end
-        return t
+        return setmetatable(t, {__name = "file"})
     end
     if mode == "r" then
         local data = self:getpath(user, path).data

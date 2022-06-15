@@ -969,16 +969,18 @@ do
 
     function debug.getlocal(thread, level, loc)
         if loc == nil then loc, level, thread = level, thread, running() end
+        local k, v
         if type(level) == "function" then
             local caller = getinfo(2, "f")
             if protectedObjects[level] and not (caller and protectedObjects[level][caller.func]) then return nil end
-            return superprotect(getlocal(level, loc))
+            k, v = superprotect(getlocal(level, loc))
         elseif tonumber(level) then
             local info = getinfo(thread, level + 1, "f")
             local caller = getinfo(2, "f")
             if info and protectedObjects[info.func] and not (caller and protectedObjects[info.func][caller.func]) then return nil end
-            return superprotect(getlocal(thread, level + 1, loc))
-        else return superprotect(getlocal(thread, level, loc)) end
+            k, v = superprotect(getlocal(thread, level + 1, loc))
+        else k, v = superprotect(getlocal(thread, level, loc)) end
+        return k, v
     end
 
     function debug.getupvalue(func, up)
@@ -986,7 +988,8 @@ do
             local caller = getinfo(2, "f")
             if protectedObjects[func] and not (caller and protectedObjects[func][caller.func]) then return nil end
         end
-        return superprotect(getupvalue(func, up))
+        local k, v = superprotect(getupvalue(func, up))
+        return k, v
     end
 
     function debug.setlocal(thread, level, loc, value)
@@ -995,8 +998,8 @@ do
             local info = getinfo(thread, level + 1, "f")
             local caller = getinfo(2, "f")
             if info and protectedObjects[info.func] and not (caller and protectedObjects[info.func][caller.func]) then error("attempt to set local of protected function", 2) end
-            return setlocal(thread, level + 1, loc, value)
-        else return setlocal(thread, level, loc, value) end
+            setlocal(thread, level + 1, loc, value)
+        else setlocal(thread, level, loc, value) end
     end
 
     function debug.setupvalue(func, up, value)
@@ -1004,21 +1007,23 @@ do
             local caller = getinfo(2, "f")
             if protectedObjects[func] and not (caller and protectedObjects[func][caller.func]) then error("attempt to set upvalue of protected function", 2) end
         end
-        return setupvalue(func, up, value)
+        setupvalue(func, up, value)
     end
 
     function _G.getfenv(f)
-        if f == nil then return n_getfenv(2)
+        local v
+        if f == nil then v = n_getfenv(2)
         elseif tonumber(f) and tonumber(f) > 0 then
             local info = getinfo(f + 1, "f")
             local caller = getinfo(2, "f")
             if info and protectedObjects[info.func] and not (caller and protectedObjects[info.func][caller.func]) then return nil end
-            return n_getfenv(f+1)
+            v = n_getfenv(f+1)
         elseif type(f) == "function" then
             local caller = getinfo(2, "f")
             if protectedObjects[f] and not (caller and protectedObjects[f][caller.func]) then return nil end
-        end
-        return n_getfenv(f)
+            v = n_getfenv(f)
+        else v = n_getfenv(f) end
+        return v
     end
 
     function _G.setfenv(f, tab)
@@ -1026,12 +1031,12 @@ do
             local info = getinfo(f + 1, "f")
             local caller = getinfo(2, "f")
             if info and protectedObjects[info.func] and not (caller and protectedObjects[info.func][caller.func]) then error("attempt to set environment of protected function", 2) end
-            return n_setfenv(f+1, tab)
+            n_setfenv(f+1, tab)
         elseif type(f) == "function" then
             local caller = getinfo(2, "f")
             if protectedObjects[f] and not (caller and protectedObjects[f][caller.func]) then error("attempt to set environment of protected function", 2) end
         end
-        return n_setfenv(f, tab)
+        n_setfenv(f, tab)
     end
 
     if d_getfenv then
@@ -1040,7 +1045,8 @@ do
                 local caller = getinfo(2, "f")
                 if protectedObjects[o] and not (caller and protectedObjects[o][caller.func]) then return nil end
             end
-            return d_getfenv(o)
+            local v = d_getfenv(o)
+            return v
         end
 
         function debug.setfenv(o, tab)
@@ -1048,7 +1054,7 @@ do
                 local caller = getinfo(2, "f")
                 if protectedObjects[o] and not (caller and protectedObjects[o][caller.func]) then error("attempt to set environment of protected function", 2) end
             end
-            return d_setfenv(o, tab)
+            d_setfenv(o, tab)
         end
     end
 
@@ -1059,14 +1065,14 @@ do
                 if protectedObjects[f1] and not (caller and protectedObjects[f1][caller.func]) then error("attempt to get upvalue of protected function", 2) end
                 if protectedObjects[f2] and not (caller and protectedObjects[f2][caller.func]) then error("attempt to set upvalue of protected function", 2) end
             end
-            return upvaluejoin(f1, n1, f2, n2)
+            upvaluejoin(f1, n1, f2, n2)
         end
     end
 
-    function debug.protect(func, ...)
+    function debug.protect(func)
         if type(func) ~= "function" then error("bad argument #1 (expected function, got " .. type(func) .. ")", 2) end
         if protectedObjects[func] then error("attempt to protect a protected function", 2) end
-        protectedObjects[func] = keys(setmetatable({}, {__mode = "k"}), func, ...)
+        protectedObjects[func] = keys(setmetatable({}, {__mode = "k"}))
     end
 
     superprotected = {
@@ -1097,5 +1103,5 @@ do
         superprotect,
         debug.protect
     )
-    for k,v in pairs(protectedObjects) do protectedObjects[k] = {[k] = v} end
+    for k,v in pairs(protectedObjects) do protectedObjects[k] = {} end
 end

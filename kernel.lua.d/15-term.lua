@@ -783,7 +783,7 @@ function terminal.openterm(tty, process)
         buffer.dirtyPalette[i] = true
     end
 
-    local win = {}
+    local win = setmetatable({}, {__name = "Terminal"})
     local redraw = terminal.redraw
     local expect = expect
 
@@ -870,7 +870,7 @@ function terminal.openterm(tty, process)
         expect(1, cx, "number")
         expect(2, cy, "number")
         if cx == buffer.cursor.x and cy == buffer.cursor.y then return end
-        buffer.cursor.x, buffer.cursor.y = cx, cy
+        buffer.cursor.x, buffer.cursor.y = math.floor(cx), math.floor(cy)
         --redraw(tty)
     end
 
@@ -981,6 +981,8 @@ function syscalls.openterm(process, thread)
     return terminal.openterm(process.stdout, process)
 end
 
+-- TODO: make final decision on whether graphics terminals are 0-based or 1-based
+
 function terminal.opengfx(tty, process)
     if not term.drawPixels then return nil, "Graphics mode not supported" end
     if tty.isLocked then return nil, "Terminal already in use" end
@@ -1004,7 +1006,7 @@ function terminal.opengfx(tty, process)
         buffer.dirtyPalette[i] = true
     end
 
-    local win = {}
+    local win = setmetatable({}, {__name = "GFXTerminal"})
     local redraw = terminal.redraw
     local expect = expect
 
@@ -1031,6 +1033,7 @@ function terminal.opengfx(tty, process)
         expect(2, y, "number")
         expect.range(x, 0, size.width * 6 - 1)
         expect.range(y, 0, size.height * 9 - 1)
+        x, y = math.floor(x), math.floor(y)
         return buffer[y+1]:byte(x+1)
     end
 
@@ -1042,6 +1045,7 @@ function terminal.opengfx(tty, process)
         expect.range(x, 0, size.width * 6 - 1)
         expect.range(y, 0, size.height * 9 - 1)
         expect.range(color, 0, 255)
+        x, y = math.floor(x), math.floor(y)
         buffer[y+1] = buffer[y+1]:sub(1, x) .. string.char(color) .. buffer[y+1]:sub(x + 2)
         buffer.dirtyRects[#buffer.dirtyRects+1] = {x = x, y = y, color = color}
         --if not buffer.frozen then redraw(tty) end
@@ -1056,6 +1060,7 @@ function terminal.opengfx(tty, process)
         expect(5, asStr, "boolean", "nil")
         expect.range(width, 0)
         expect.range(height, 0)
+        x, y = math.floor(x), math.floor(y)
         local t = {}
         for py = 1, height do
             if asStr then t[py] = buffer[y+py]:sub(x + 1, x + width)
@@ -1078,6 +1083,7 @@ function terminal.opengfx(tty, process)
         if height then expect.range(height, 0) end
         if isn then expect.range(data, 0, 255) end
         if width == 0 or height == 0 then return end
+        x, y = math.floor(x), math.floor(y)
         if width and x + width >= size.width * 6 then width = size.width * 6 - x end
         height = height or #data
         local rect = {x = x, y = y, width = width, height = height}

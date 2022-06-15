@@ -401,7 +401,7 @@ end
 local do_syscall = do_syscall
 
 local function makePSPHandle(socket)
-    local obj = {id = socket.id}
+    local obj = setmetatable({id = socket.id}, {__name = "socket"})
     function obj:status()
         if socket.status == "listening" or socket.status == "syn-sent" or socket.status == "syn-received" then return "connecting"
         elseif socket.status == "connected" then return "connected"
@@ -743,6 +743,7 @@ eventHooks.modem_message[#eventHooks.modem_message+1] = function(ev)
             syslog.log({level = "notice", module = "Network"}, "Received network event for device ID " .. ev[2] .. ", but no device node was found; ignoring")
             return
         end
+        if not ipconfig[node.uuid] or not ipconfig[node.uuid].up then return end
         syslog.debug(ev[2], serialize(ev[5]))
         local ok, err = pcall(protocols.recv[ev[5].type], {channel = ev[3], replyChannel = ev[4], device = node}, ev[5])
         if not ok then syslog.log({level = "debug", module = "Network"}, "Network event errored while processing:", err)
@@ -885,7 +886,7 @@ local function httpHandler(process, options)
     expect.field(options, "method", "string", "nil")
     expect.field(options, "redirect", "boolean", "nil")
     local info = {status = "ready", process = process, id = nextHandleID}
-    local obj = {id = nextHandleID}
+    local obj = setmetatable({id = nextHandleID}, {__name = "socket"})
     nextHandleID = nextHandleID + 1
     function obj:status()
         return info.status, info.error
@@ -956,7 +957,7 @@ local function wsHandler(process, options)
     expect.field(options, "encoding", "string", "nil")
     expect.field(options, "headers", "table", "nil")
     local info = {process = process, id = nextHandleID, buffer = ""}
-    local obj = {id = nextHandleID}
+    local obj = setmetatable({id = nextHandleID}, {__name = "socket"})
     nextHandleID = nextHandleID + 1
     function obj:status()
         return info.status, info.error
@@ -1037,7 +1038,7 @@ local function rednetHandler(process, options)
     if not uri.host then error("Missing host", 2) end
     local id = ipToNumber(uri.host)
     local info = {process = process, id = nextHandleID, buffer = {}, protocol = uri.scheme:match "rednet%+(.+)"}
-    local obj = {id = nextHandleID}
+    local obj = setmetatable({id = nextHandleID}, {__name = "socket"})
     nextHandleID = nextHandleID + 1
     function obj:status()
         return info.closed and "closed" or "open"
@@ -1202,7 +1203,7 @@ function syscalls.listen(process, thread, uri)
 end
 
 function syscalls.unlisten(process, thread, uri)
-
+    -- TODO
 end
 
 function syscalls.ipconfig(process, thread, device, info)
