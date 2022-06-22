@@ -139,13 +139,16 @@ function createLuaLib(process)
 
     G.math.random, G.math.randomseed = makeRandom()
 
-    local oldcreate = coroutine.create
-    local sethook = debug.sethook
-    function G.coroutine.create(func)
-        -- since the hook is inherited (not good in child coroutines!) we need to erase it
-        local coro = oldcreate(func)
-        if coro and debug then sethook(coro, nil, "", 0) end
-        return coro
+    -- Coroutines are also preempted, so we'll help out by automatically preempting the caller too.
+    -- NOTE: Do not intentionally yield a coroutine with a single `preempt` value! This will trigger
+    -- the preemption code here, making your coroutine not actually yield back to your program.
+    local oldresume = G.coroutine.resume
+    G.coroutine.resume = function(...)
+        local retval = table.pack(oldresume(...))
+        while retval.n == 2 and retval[1] == true and retval[2] == "preempt" do
+            retval = table.pack(oldresume(coroutine.yield("preempt")))
+        end
+        return table.unpack(retval, 1, retval.n)
     end
 
     local stdin_buffer = ""

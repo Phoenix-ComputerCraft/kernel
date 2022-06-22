@@ -39,7 +39,7 @@ function syscalls.sendEvent(process, thread, pid, name, params)
     expect(1, pid, "number")
     expect(2, name, "string")
     local target = processes[pid]
-    if not target then error("No such process", 2) end
+    if not target then return false end
     -- TODO: figure out filtering
     target.eventQueue[#target.eventQueue+1] = {"remote_event", {type = name, sender = process.id, data = params}}
     return true -- TODO: ?
