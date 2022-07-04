@@ -213,7 +213,7 @@ function syscalls.exec(process, thread, path, ...)
     else
         local func, err = load(contents, "@" .. path, "bt")
         if not func then error("Could not execute file: " .. err, 0) end
-        process.name = path
+        process.name = fs.combine(path:sub(1, 1) == "/" and "" or process.dir, path)
         process.threads = {
             [0] = {
                 id = 0,

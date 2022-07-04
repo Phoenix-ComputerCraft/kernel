@@ -293,7 +293,7 @@ end
 
 syslogs.default.file = filesystem.open(KERNEL, "/var/log/default.log", "a")
 
-syslog.log("Starting [REDACTED] version", PHOENIX_VERSION, PHOENIX_BUILD)
+syslog.log("Starting Phoenix version", PHOENIX_VERSION, PHOENIX_BUILD)
 syslog.log("Initialized system logger")
 syslog.log("System started at " .. systemStartTime .. " on computer " .. os.computerID() .. (os.computerLabel() and "('" .. os.computerLabel() .. "')" or ""))
 syslog.log("Computer host is " .. _HOST)

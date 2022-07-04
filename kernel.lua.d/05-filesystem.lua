@@ -224,6 +224,8 @@ function filesystems.craftos:stat(process, path)
         return attr
     end
     attr.isReadOnly = nil
+    attr.capacity = fs.getCapacity(p)
+    attr.freeSpace = fs.getFreeSpace(p)
     local meta = self:getmeta(process.user, fs.combine(self.path, path))
     -- The path may exist on the filesystem but have no metadata.
     if meta then
@@ -656,6 +658,8 @@ function filesystems.tmpfs:stat(process, path)
         permissions = deepcopy(data.permissions),
         worldPermissions = deepcopy(data.worldPermissions),
         setuser = data.setuser,
+        capacity = math.huge,
+        freeSpace = math.huge,
         special = {}
     }
 end

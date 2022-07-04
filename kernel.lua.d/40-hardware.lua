@@ -403,6 +403,10 @@ function syscalls.cchost(process, thread)
     return _HOST
 end
 
+function syscalls.uptime(process, thread)
+    return (os.epoch "utc" - systemStartTime) / 1000
+end
+
 -- TODO: temporary?
 function syscalls.serialize(process, thread, value)
     return serialize(value)

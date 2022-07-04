@@ -788,6 +788,8 @@ function split(str, sep)
     return t
 end
 
+local procTime = pcall(os.epoch, "nano") and function() return os.epoch "nano" / 1000000 end or function() return os.epoch "utc" end
+
 local empty_packed_table = {n = 0}
 --- Resumes a thread's coroutine, handling different yield types.
 -- @tparam Process process The process that owns the thread
@@ -814,10 +816,10 @@ function executeThread(process, thread, ev, dead, allWaiting)
             thread.yielding = nil
         else
             --syslog.debug("Resuming thread", tid)
-            local start = os.epoch "utc"
+            local start = procTime()
             params = table.pack(coroutine.resume(thread.coro, table.unpack(args, 1, args.n)))
             --syslog.debug("Yield", params.n, table.unpack(params, 1, params.n))
-            process.cputime = process.cputime + (os.epoch "utc" - start) / 1000
+            process.cputime = process.cputime + (procTime() - start) / 1000
         end
         if params[2] == "syscall" then
             --syslog.debug("Calling syscall", params[3])
@@ -825,9 +827,9 @@ function executeThread(process, thread, ev, dead, allWaiting)
             local oldAllWaiting = allWaiting
             allWaiting = false
             if params[3] and syscalls[params[3]] then
-                local start = os.epoch "utc"
+                local start = procTime()
                 thread.syscall_return = table.pack(xpcall(syscalls[params[3]], debug.traceback, process, thread, table.unpack(params, 4, params.n)))
-                process.systime = process.systime + (os.epoch "utc" - start) / 1000
+                process.systime = process.systime + (procTime() - start) / 1000
                 if not thread.syscall_return[1] and type(thread.syscall_return[2]) == "string" then
                     syslog.log({level = "debug", category = "Syscall Failure", process = 0}, thread.syscall_return[2])
                     thread.syscall_return[2] = thread.syscall_return[2]:gsub("kernel:%d+: ", "")

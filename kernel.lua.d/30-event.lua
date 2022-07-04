@@ -219,7 +219,7 @@ do
     keymap[keys.pageDown] = 0xC5
     keymap[keys.home] = 0xC6
     keymap[keys["end"]] = 0xC7
-    keymap[keys.circumflex or keys.cimcumflex] = 0xC8
+    if keys.circumflex or keys.cimcumflex then keymap[keys.circumflex or keys.cimcumflex] = 0xC8 end
     if keys.at then keymap[keys.at] = 0xC9 end
     if keys.colon then keymap[keys.colon] = 0xCA end
     if keys.underscore then keymap[keys.underscore] = 0xCB end

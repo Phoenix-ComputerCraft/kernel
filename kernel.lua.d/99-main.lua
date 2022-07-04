@@ -154,6 +154,7 @@ while processes[init_pid] do
             if pid == init_pid then
                 init_retval = process.lastReturnValue.value or process.lastReturnValue.error
             elseif processes[process.parent] then
+                process.lastReturnValue.id = pid
                 processes[process.parent].eventQueue[#processes[process.parent].eventQueue+1] = {"process_complete", process.lastReturnValue}
             end
             reap_process(process)

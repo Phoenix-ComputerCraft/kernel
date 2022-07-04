@@ -278,12 +278,12 @@ function terminal.resize(tty, width, height)
         end
         if tty.isLocked then
             if tty.isGraphics then
-                for y = height + 1, tty.size.height do
-                    tty.textBuffer[y] = nil
-                end
-            else
                 for y = height * 9 + 1, tty.size.height * 9 do
                     tty.graphicsBuffer[y] = nil
+                end
+            else
+                for y = height + 1, tty.size.height do
+                    tty.textBuffer[y] = nil
                 end
             end
         end
@@ -484,8 +484,8 @@ local CSI = {
             elseif m == 39 then tty.colors.fg = '0'
             elseif m >= 40 and m <= 47 then tty.colors.bg = ("%x"):format(15 - (m - 40) - (tty.colors.bold and 8 or 0))
             elseif m == 49 then tty.colors.bg = 'f'
-            elseif n >= 90 and n <= 97 then tty.colors.fg = ("%x"):format(15 - (n - 90) - 8)
-            elseif n >= 100 and n <= 107 then tty.colors.bg = ("%x"):format(15 - (n - 100) - 8) end
+            elseif m >= 90 and m <= 97 then tty.colors.fg = ("%x"):format(15 - (m - 90) - 8)
+            elseif m >= 100 and m <= 107 then tty.colors.bg = ("%x"):format(15 - (m - 100) - 8) end
         end
     end, -- SGR
     n = function(tty, params)
@@ -649,10 +649,10 @@ end
 
 function syscalls.write(process, thread, ...)
     if not process.stdout then return end
-    if process.stdout.isTTY and process ~= process.stdout.frontmostProcess then
+    --[[if process.stdout.isTTY and process ~= process.stdout.frontmostProcess then
         syscalls.kill(KERNEL, nil, process.id, 22)
         if process.paused then return kSyscallYield, "write" end
-    end
+    end]]
     local function write(t)
         if process.stdout.isTTY then terminal.write(process.stdout, t)
         else process.stdout.write(t) end
@@ -666,10 +666,10 @@ end
 
 function syscalls.writeerr(process, thread, ...)
     if not process.stderr then return end
-    if process.stderr.isTTY and process ~= process.stderr.frontmostProcess then
+    --[[if process.stderr.isTTY and process ~= process.stderr.frontmostProcess then
         syscalls.kill(KERNEL, nil, process.id, 22)
         if process.paused then return kSyscallYield, "writeerr" end
-    end
+    end]]
     local function write(t)
         if process.stderr.isTTY then terminal.write(process.stderr, t)
         else process.stderr.write(t) end
@@ -684,10 +684,10 @@ end
 function syscalls.read(process, thread, n)
     expect(1, n, "number")
     if process.stdin then
-        if process.stdin.isTTY and process ~= process.stdin.frontmostProcess then
+        --[[if process.stdin.isTTY and process ~= process.stdin.frontmostProcess then
             syscalls.kill(KERNEL, nil, process.id, 21)
             if process.paused then return kSyscallYield, "readline" end
-        end
+        end]]
         if process.stdin.eof then
             process.stdin.eof = false
             return nil
@@ -712,10 +712,10 @@ end
 
 function syscalls.readline(process, thread)
     if process.stdin then
-        if process.stdin.isTTY and process ~= process.stdin.frontmostProcess then
+        --[[if process.stdin.isTTY and process ~= process.stdin.frontmostProcess then
             syscalls.kill(KERNEL, nil, process.id, 21)
             if process.paused then return kSyscallYield, "readline" end
-        end
+        end]]
         if process.stdin.eof then
             process.stdin.eof = false
             return nil
@@ -957,6 +957,13 @@ function terminal.openterm(tty, process)
         buffer.palette[math.floor(color)] = {r, g, b}
         buffer.dirtyPalette[math.floor(color)] = true
         --redraw(tty)
+    end
+
+    function win.getLine(y)
+        if not win then error("terminal is already closed", 2) end
+        expect(1, y, "number")
+        local l = buffer[y]
+        return l and table.unpack(l, 1, 3)
     end
 
     for _, v in pairs(win) do setfenv(v, process.env) debug.protect(v) end

@@ -71,7 +71,8 @@ function createLuaLib(process)
     local G = {}
     for _,v in ipairs{"assert", "error", "getfenv", "getmetatable", "ipairs", "next",
         "pairs", "pcall", "rawequal", "rawget", "rawset", "select", "setfenv",
-        "setmetatable", "tonumber", "tostring", "type", "_VERSION", "xpcall"} do G[v] = _G[v] end
+        "setmetatable", "tonumber", "tostring", "type", "_VERSION", "xpcall", "collectgarbage"} do G[v] = _G[v] end
+    -- TODO: remove collectgarbage!!!
 
     -- TODO: update the below notice since we can just localize globals we need (!)
 

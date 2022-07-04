@@ -8,7 +8,7 @@ This license governs the use of all software products as part of the Phoenix ope
 
 - "pxboot" bootloader (excluding "UnBIOS")
 - "Phoenix" kernel
-- "startd" initialization system
+- "startmgr" initialization system
 - "libsystem" library
 - "baseutils" programs (excluding "cash")
 - "coresvc" programs

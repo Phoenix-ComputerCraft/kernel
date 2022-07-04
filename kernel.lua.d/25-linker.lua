@@ -59,9 +59,9 @@ function createRequire(process, G)
         G.package.path = oldenv.package and oldenv.package.path
         G.package.libpath = oldenv.package and oldenv.package.libpath
     end
-    G.package.path = G.package.path or "/lib/?.lua;/lib/?/init.lua;/usr/lib/?.lua;/usr/lib/?/init.lua;./?.lua;./?/init.lua"
+    G.package.path = G.package.path or "/lib/?.lua;/lib/?/init.lua;/usr/lib/?.lua;/usr/lib/?/init.lua;@/?.lua;@/?/init.lua;./?.lua;./?/init.lua"
     G.package.libpath = G.package.libpath or "/lib/lib?.a;/usr/lib/lib?.a"
-    G.package.config = "/\n;\n?\n!\n-"
+    G.package.config = "/\n;\n?\n!\n-\n@"
     G.package.loaded = {}
     G.package.preload = {}
     G.package.forceload = false
@@ -123,9 +123,10 @@ function createRequire(process, G)
         sep = (sep or "."):gsub("([%^%$%(%)%%%.%[%]%*%+%-%?])", "%%%1")
         rep = (rep or "/"):gsub("([%^%$%(%)%%%.%[%]%*%+%-%?])", "%%%1")
         local msg = ""
+        local processPath = "/" .. do_syscall("getname"):gsub("/?[^/]+$", "")
 
         for p in path:gmatch "[^;]+" do
-            local pp = p:gsub("%?", name:gsub(sep, rep), nil)
+            local pp = p:gsub("%?", name:gsub(sep, rep), nil):gsub("@", processPath)
             local file, err = do_syscall("open", pp, "r")
             if file then
                 file.close()
