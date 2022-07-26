@@ -5,6 +5,17 @@ local syscall = setmetatable({}, {__index = function(self, idx)
         else error(retval[2], 2) end
     end
 end, __newindex = function() end})
+local has_lfs, lfs = pcall(require, "lfs")
+if has_lfs then
+    fs = {}
+    function fs.list(path)
+        local list = {}
+        for name in lfs.dir(path) do if not name:match "^%.+$" then list[#list+1] = name end end
+        table.sort(list)
+        return list
+    end
+    function fs.combine(a, b) return a .. "/" .. b end
+end
 
 local args = {...}
 if #args < 2 then error("Usage: compile <kernel.lua> <output.lua>") end
@@ -24,7 +35,7 @@ end
 
 file, err = io.open(args[2], "w")
 if not file then error("Could not open output: " .. err) end
-file:write(kernel:sub(1, kernel:find("-- ==== LOADER ====", 1, true) - 1):gsub("%$BUILD_DATE%$", os.date()))
+file:write((kernel:sub(1, kernel:find("-- ==== LOADER ====", 1, true) - 1):gsub("%$BUILD_DATE%$", os.date())))
 file:write(parts)
 file:write(kernel:sub(select(2, kernel:find("-- == END LOADER ==", 1, true)) + 1))
 file:close()

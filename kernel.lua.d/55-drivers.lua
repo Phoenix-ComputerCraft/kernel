@@ -340,7 +340,7 @@ drivers.peripheral_drive = {
 function drivers.peripheral_drive.methods:getState(process)
     if not self.internalState.peripheral.call(self.id, "isDiskPresent") then return nil end
     return {
-        isAudio = self.internalState.peripheral.call(self.id, "hasAudio"),
+        audio = self.internalState.peripheral.call(self.id, "getAudioTitle") or nil,
         label = self.internalState.peripheral.call(self.id, "getDiskLabel"),
         id = self.internalState.peripheral.call(self.id, "getDiskID")
     }

@@ -48,6 +48,7 @@
 ]]
 
 -- TODO: Add disk space metrics
+-- TODO: Add links, FIFOs, special file support
 
 --- Stores the current mounts as a key-value table of paths to filesystem objects.
 mounts = {}
@@ -84,7 +85,7 @@ filesystems = {
 do
     local file = fs.open("/meta.ltn", "r")
     if file then
-        filesystems.craftos.meta = unserialize(file.readAll())
+        filesystems.craftos.meta = unserialize(file.readAll()) or filesystems.craftos.meta
         file.close()
     end
 end
@@ -113,6 +114,7 @@ end
 function filesystems.craftos:setmeta(user, path, meta)
     local stack = {}
     local t = self.meta
+    local name
     for _,p in ipairs(split(path, "/\\")) do
         if p == ".." then
             t = table.remove(stack)
@@ -124,7 +126,7 @@ function filesystems.craftos:setmeta(user, path, meta)
             if not t.contents[p] then t.contents[p] = { -- Initialize with default directory meta if not present
                 meta = {                                -- This means the directory was created on-disk but the metadata was never set
                     type = "directory",                 -- We'll set it properly at the end (or something)
-                    owner = "root",                     -- TODO: maybe set this to the parent's permissions? (Would maybe make more sense)
+                    owner = t.meta.owner or "root",     -- TODO: maybe set this to the parent's permissions? (Would maybe make more sense)
                     permissions = {
                         root = {read = true, write = true, execute = true}
                     },
@@ -135,18 +137,21 @@ function filesystems.craftos:setmeta(user, path, meta)
             } end
             stack[#stack+1] = t
             t = t.contents[p]
+            name = p
             -- TODO: handle link traversal
             --if t and t.meta.type == "link" then t = ? end
         end
     end
-    t.meta = {
-        type = meta.type,
-        owner = meta.owner,
-        permissions = meta.permissions,
-        worldPermissions = meta.worldPermissions,
-        setuser = false
-    }
-    if meta.type ~= "directory" then t.contents = nil end
+    if meta ~= nil then
+        t.meta = {
+            type = meta.type,
+            owner = meta.owner,
+            permissions = deepcopy(meta.permissions),
+            worldPermissions = deepcopy(meta.worldPermissions),
+            setuser = meta.setuser
+        }
+        if meta.type ~= "directory" then t.contents = nil end
+    else stack[#stack].contents[name] = nil end
     local file = fs.open("/meta.ltn", "w")
     file.write(serialize(self.meta))
     file.close()
@@ -170,10 +175,11 @@ function filesystems.craftos:open(process, path, mode)
         if mode:sub(1, 1) == "w" or mode:sub(1, 1) == "a" then
             if self.readOnly then return nil, "Read-only filesystem" end
             local pok, pstat = pcall(self.stat, self, process, fs.getDir(path))
-            if not pok then
+            if not pok or not pstat then
                 local mok, err = pcall(self.mkdir, self, process, fs.getDir(path))
                 if not mok then return nil, err:gsub("kernel:%d: ", "") end
                 pstat = self:stat(process, fs.getDir(path))
+                if not pstat then return nil, "Could not stat " .. fs.getDir(path) end
             end
             local perms = pstat.permissions[process.user] or pstat.worldPermissions
             if not perms.write then return nil, "Permission denied" end
@@ -189,7 +195,9 @@ function filesystems.craftos:open(process, path, mode)
             meta.permissions[pstat.owner] = nil
             meta.permissions[process.user] = t
             self:setmeta(process.user, fs.combine(self.path, path), meta)
-            return setmetatable(fs.open(fs.combine(self.path, path), mode), {__name = "file"})
+            local file, err = fs.open(fs.combine(self.path, path), mode)
+            if not file then return file, err end
+            return setmetatable(file, {__name = "file"})
         else return nil, "File not found" end
     elseif stat.type == "directory" then return nil, "Is a directory" end
     local perms = stat.permissions[process.user] or stat.worldPermissions
@@ -259,7 +267,7 @@ function filesystems.craftos:remove(process, path)
         end
     end
     checkWriteRecursive(path)
-    fs.remove(fs.combine(self.path, path))
+    fs.delete(fs.combine(self.path, path))
     self:setmeta(process.user, fs.combine(self.path, path), nil)
 end
 
@@ -332,7 +340,7 @@ function filesystems.craftos:chmod(process, path, user, mode)
         end
     end
     if type(mode) == "string" then
-        if mode:match "^[+-=][rwxs]+$" then
+        if mode:match "^[%+%-=][rwxs]+$" then
             local m = mode:sub(1, 1)
             local t = {}
             for c in mode:gmatch("[rwxs]") do
@@ -383,7 +391,12 @@ function filesystems.craftos:chown(process, path, owner)
     if not stat then error(path .. ": No such file or directory", 2) end
     if not stat.owner or (process.user ~= "root" and process.user ~= stat.owner) then error(path .. ": Permission denied", 2) end
     stat.owner = owner
+    stat.setuser = false
     self:setmeta(process.user, fs.combine(self.path, path), deepcopy(stat))
+end
+
+function filesystems.craftos:info()
+    return "craftos", self.path, {ro = self.readOnly}
 end
 
 -- tmpfs implementation
@@ -741,7 +754,7 @@ function filesystems.tmpfs:chmod(process, path, user, mode)
         end
     end
     if type(mode) == "string" then
-        if mode:match "^[+-=][rwxs]+$" then
+        if mode:match "^[%+%-=][rwxs]+$" then
             local m = mode:sub(1, 1)
             local t = {}
             for c in mode:gmatch("[rwxs]") do
@@ -791,16 +804,29 @@ function filesystems.tmpfs:chown(process, path, owner)
     if not stat then error(path .. ": No such file or directory", 2) end
     if not stat.owner or (process.user ~= "root" and process.user ~= stat.owner) then error(path .. ": Permission denied", 2) end
     stat.owner = owner
+    stat.setuser = false
     --self:setpath(process.user, fs.combine(self.path, path), deepcopy(stat))
+end
+
+function filesystems.tmpfs:info()
+    return "tmpfs", "memory", {}
 end
 
 -- drivefs implementation
 -- drivefs just inherits from craftos, but automatically locates drive mounts from hardware devices.
 
+setmetatable(filesystems.drivefs, {__index = filesystems.craftos})
+
 function filesystems.drivefs:new(process, src, options)
     local drive = hardware.get(src)
     if not drive then error("Could not find drive at " .. src) end
-    return filesystems.craftos:new(process, hardware.call(process, drive, "getMountPath"), options)
+    local fs = filesystems.craftos:new(process, hardware.call(process, drive, "getMountPath"), options)
+    fs.drive = drive.uuid
+    return setmetatable(fs, {__index = self})
+end
+
+function filesystems.drivefs:info()
+    return "drivefs", self.drive, {ro = self.readOnly}
 end
 
 -- Syscalls
@@ -917,8 +943,8 @@ function filesystem.chmod(process, path, user, mode)
     expect(1, path, "string")
     expect(2, user, "string", "nil")
     expect(3, mode, "number", "string", "table")
-    if type(mode) == "string" and not mode:match "^[+-=][rwx]+$" and not mode:match "^[r-][w-][x-]$" then
-        error("bad argument #2 (invalid mode)", 2)
+    if type(mode) == "string" and not mode:match "^[%+%-=][rwxs]+$" and not mode:match "^[r%-][w%-][xs%-]$" then
+        error("bad argument #3 (invalid mode)", 2)
     elseif type(mode) == "table" then
         expect.field(mode, "read", "boolean", "nil")
         expect.field(mode, "write", "boolean", "nil")
@@ -976,6 +1002,16 @@ function filesystem.unmount(process, path)
     mounts[fs.combine(path)] = nil
 end
 
+function filesystem.mountlist(process)
+    expect(0, process, "table")
+    local retval = {}
+    for k, v in pairs(mounts) do
+        local type, path, options = v:info()
+        retval[#retval+1] = {path = k, type = type, source = path, options = options}
+    end
+    return retval
+end
+
 --- Combines the specified path components into a single path.
 -- @tparam string first The first path component
 -- @tparam string ... Any additional path components to add
@@ -996,6 +1032,7 @@ function syscalls.chmod(process, thread, ...) return filesystem.chmod(process, .
 function syscalls.chown(process, thread, ...) return filesystem.chown(process, ...) end
 function syscalls.mount(process, thread, ...) return filesystem.mount(process, ...) end
 function syscalls.unmount(process, thread, ...) return filesystem.unmount(process, ...) end
+function syscalls.mountlist(process, thread, ...) return filesystem.mountlist(process, ...) end
 function syscalls.combine(process, thread, ...) return filesystem.combine(...) end
 
 -- This syscall provides CraftOS APIs (and modules) without having to mount the entire ROM.

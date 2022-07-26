@@ -69,7 +69,7 @@ for _, v in ipairs(fs.list(fs.combine(args.root, args.splitkernpath))) do
     if not file then panic("Could not read kernel part " .. v .. ": " .. err) end
     local fn, err = (loadstring or load)(file.readAll(), --[["@" .. fs.combine(args.root, args.splitkernpath, v)]] "=kernel:" .. v)
     file.close()
-    if not fn then panic("Could not load kernel part " .. v .. ": " .. err) end
+    if not fn then (panic or error)("Could not load kernel part " .. v .. ": " .. err) end
     fn(...)
 end
 

@@ -162,10 +162,24 @@ if _VERSION == "Lua 5.1" then
     end
 end
 
+
 -- Fix fs.combine on older versions to allow variable arguments
 if tonumber(_HOST:match "ComputerCraft 1.(%d+)") < 95 then
+    -- The verbosity here fixes some issues with the sumneko Lua LSP.
+    ---@param base string
+    ---@param extra string
+    ---@return string
     local oldc = fs.combine
-    function fs.combine(p, ...) if ... then return oldc(p, fs.combine(...)) else return p end end
+    ---@param p string
+    ---@param ... string
+    ---@return string
+    function fs.combine(p, ...)
+        if (...) ~= nil then
+            return oldc(p, fs.combine(...))
+        else
+            return p
+        end
+    end
 end
 
 -- Add string.pack if it's not present

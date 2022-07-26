@@ -141,7 +141,8 @@ end
 -- @tparam TTY tty The TTY to redraw
 -- @tparam boolean full Whether to draw the full screen, or just the changed regions
 function terminal.redraw(tty, full)
-    if currentTTY ~= tty and not tty.isMonitor then return end
+    if tty.process then tty.process.eventQueue[#tty.process.eventQueue+1] = {"tty_redraw", {id = tty.id}} return
+    elseif currentTTY ~= tty and not tty.isMonitor then return end
     local term = tty.term
     local buffer = tty
     if tty.isLocked then
@@ -1181,6 +1182,8 @@ function syscalls.mktty(process, thread, width, height)
     expect.range(width, 1)
     expect.range(height, 1)
     local tty = terminal.makeTTY(term, width, height)
+    tty.id = math.random(0, 0x7FFFFFFF)
+    tty.process = process
     local retval = setmetatable({}, {__index = tty, __metatable = {}})
     terminal.userTTYs[retval] = tty
     process.dependents[#process.dependents+1] = {gc = function() terminal.userTTYs[retval] = nil end}

@@ -33,7 +33,7 @@ local function ar_load(data)
         if string.match(name, "^#1/%d+$") then name = read(tonumber(string.match(name, "#1/(%d+)")))
         elseif string.match(name, "^/%d+$") then if name_table then
             local n = tonumber(string.match(name, "/(%d+)"))
-            name = string.sub(name_table, n+1, string.find(name_table, "\n", n+1) - 1)
+            name = name_table:match("[^/]*", n+1)
         else table.insert(name_rep, name) end end
         data.name = name
         data.data = read(size)
@@ -42,7 +42,7 @@ local function ar_load(data)
     end
     if name_table then for k,v in pairs(name_rep) do
         local n = tonumber(string.match(v, "/(%d+)"))
-        for l,w in pairs(retval) do if w.name == v then w.name = string.sub(name_table, n, string.find(name_table, "/", n) - 1) break end end
+        for l,w in pairs(retval) do if w.name == v then w.name = name_table:match("[^/]*", n+1) break end end
     end end
     local retval2 = {}
     for _, v in ipairs(retval) do retval2[v.name] = v end
@@ -59,15 +59,16 @@ function createRequire(process, G)
         G.package.path = oldenv.package and oldenv.package.path
         G.package.libpath = oldenv.package and oldenv.package.libpath
     end
-    G.package.path = G.package.path or "/lib/?.lua;/lib/?/init.lua;/usr/lib/?.lua;/usr/lib/?/init.lua;@/?.lua;@/?/init.lua;./?.lua;./?/init.lua"
+    G.package.path = G.package.path or "/lib/?.lua;/lib/?/init.lua;/usr/lib/?.lua;/usr/lib/?/init.lua;./?.lua;./?/init.lua"
     G.package.libpath = G.package.libpath or "/lib/lib?.a;/usr/lib/lib?.a"
-    G.package.config = "/\n;\n?\n!\n-\n@"
+    G.package.config = "/\n;\n?\n!\n-"
     G.package.loaded = {}
     G.package.preload = {}
     G.package.forceload = false
     for k, v in pairs(G) do if type(v) == "table" then G.package.loaded[k] = v end end
 
     local sentinel = setmetatable({}, {__newindex = function() end, __metatable = false})
+    local localLoaders = {}
 
     local function fileLoader(name, path)
         local file, err = do_syscall("open", path, "rb")
@@ -76,14 +77,14 @@ function createRequire(process, G)
         file.close()
         local fn, err = load(data, "@" .. path, nil, _ENV)
         if not fn then error(path .. ": " .. err, 3) end
-        local oldcwd
-        local dir = path:match("^(.*)/[^/]*$")
-        if dir then
-            oldcwd = do_syscall("getcwd")
-            do_syscall("chdir", dir)
+        local dir = path:match("^(.*)/[^/]*$") or "/"
+        localLoaders[#localLoaders+1] = function(name2)
+            local path, err = package.searchpath(name2, dir .. "/?.lua;" .. dir .. "/?/init.lua")
+            if not path then return nil, err end
+            return fileLoader, path
         end
         local ok, res = pcall(fn, name)
-        if oldcwd then do_syscall("chdir", oldcwd) end
+        localLoaders[#localLoaders] = nil
         if ok then return res
         else error(path .. ": " .. res, 3) end
     end
@@ -100,7 +101,7 @@ function createRequire(process, G)
         local dir = ar_load(data)
         local function preloader(name)
             local p = name .. ".lua"
-            if not dir[p] then error("No such file") end
+            if not dir[p] then error(path .. ":" .. p .. ": File not found", 0) end
             local data = dir[p].data
             local fn, err = load(data, "@" .. path .. ":" .. p, nil, _ENV)
             if not fn then error(path .. ":" .. p .. ": " .. err, 3) end
@@ -108,11 +109,17 @@ function createRequire(process, G)
             if ok then return res
             else error(path .. ":" .. p .. ": " .. res) end
         end
-        local pre = {}
-        for k in pairs(dir) do pre[k], package.preload[k] = package.preload[k], preloader end
-        local res, err = preloader(libname)
-        for k in pairs(dir) do package.preload[k] = pre[k] end
-        return res, err
+        localLoaders[#localLoaders+1] = function(name2) return preloader, name2 end
+        local res = preloader(libname)
+        localLoaders[#localLoaders] = nil
+        return res
+    end
+
+    localLoaders[1] = function(name)
+        local dir = do_syscall("getname"):match("^(.*)/[^/]*$") or "/"
+        local path, err = package.searchpath(name, dir .. "/?.lua;" .. dir .. "/?/init.lua")
+        if not path then return nil, err end
+        return fileLoader, path
     end
 
     function G.package.searchpath(name, path, sep, rep)
@@ -123,10 +130,9 @@ function createRequire(process, G)
         sep = (sep or "."):gsub("([%^%$%(%)%%%.%[%]%*%+%-%?])", "%%%1")
         rep = (rep or "/"):gsub("([%^%$%(%)%%%.%[%]%*%+%-%?])", "%%%1")
         local msg = ""
-        local processPath = "/" .. do_syscall("getname"):gsub("/?[^/]+$", "")
 
         for p in path:gmatch "[^;]+" do
-            local pp = p:gsub("%?", name:gsub(sep, rep), nil):gsub("@", processPath)
+            local pp = p:gsub("%?", name:gsub(sep, rep), nil)
             local file, err = do_syscall("open", pp, "r")
             if file then
                 file.close()
@@ -146,47 +152,68 @@ function createRequire(process, G)
         function(name)
             local path, err = package.searchpath(name, package.path)
             if not path then return nil, err end
-            return fileLoader, path
+            return fileLoader, path, path
         end,
         function(name)
-            local path, err = package.searchpath(name:match("^[^-]*"), package.libpath)
+            local path, err = package.searchpath(name:match("^[^%-]*"), package.libpath)
             if not path then return nil, err end
-            return libraryLoader, path
+            local n = name:match("%-(.+)$")
+            if n then return libraryLoader, path, path .. ":" .. n
+            else return libraryLoader, path, path .. ":init" end
         end,
         function(name)
             if not name:find "%." then return nil end
             local path, err = package.searchpath(name:match("^[^%.]*"), package.libpath)
             if not path then return nil, err end
-            return libraryLoader, path .. "\0" .. name:match("^[^%.]*%.(.*)$")
+            local n = name:match("^[^%.]*%.(.*)$")
+            return libraryLoader, path .. "\0" .. n, path .. ":" .. n
+        end,
+        function(name)
+            if #localLoaders > 0 then return localLoaders[#localLoaders](name) end
+            return nil, "no local loaders found"
         end
     }
 
-    setfenv(fileLoader, G)
-    setfenv(libraryLoader, G)
-    for _,v in pairs(G.package.searchers) do setfenv(v, G) end
+    setfenv(fileLoader, G) debug.protect(fileLoader)
+    setfenv(libraryLoader, G) debug.protect(libraryLoader)
+    setfenv(localLoaders[1], G) debug.protect(localLoaders[1])
+    for _,v in pairs(G.package.searchers) do setfenv(v, G) debug.protect(v) end
 
     function G.require(name)
         expect(1, name, "string")
-        if package.loaded[name] then
-            if package.loaded[name] == sentinel then error("loop detected loading '" .. name .. "'", 3)
-            elseif not package.forceload then return package.loaded[name] end
-        end
         local err = "module '" .. name .. "' not found:\n"
-        local loader, arg
+        local loader, arg, pathname
         for _, v in ipairs(package.searchers) do
-            loader, arg = v(name)
+            loader, arg, pathname = v(name)
             if loader then break end
             err = err .. (arg or "")
         end
         if not loader then error(err, 2) end
+        if pathname then
+            if package.loaded[pathname] then
+                if package.loaded[pathname] == sentinel then error("loop detected loading '" .. name .. "'", 3)
+                elseif not package.forceload then return package.loaded[pathname] end
+            end
+            package.loaded[pathname] = sentinel
+        else
+            if package.loaded[name] then
+                if package.loaded[name] == sentinel then error("loop detected loading '" .. name .. "'", 3)
+                elseif not package.forceload then return package.loaded[name] end
+            end
+        end
         package.loaded[name] = sentinel
         local ok, res = pcall(loader, name, arg)
         if ok then
             if res ~= nil then package.loaded[name] = res
             elseif package.loaded[name] == sentinel then package.loaded[name] = true end
+            if pathname then
+                if res ~= nil then package.loaded[pathname] = res
+                elseif package.loaded[pathname] == sentinel then package.loaded[pathname] = true end
+            end
             return package.loaded[name]
         else
             package.loaded[name] = nil
+            if pathname then package.loaded[pathname] = nil end
             error(err .. "\t" .. res .. "\n", 2)
         end
     end

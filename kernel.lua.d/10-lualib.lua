@@ -455,7 +455,13 @@ function createLuaLib(process)
     local oldos = os
     G.os = {
         clock = function() return do_syscall("clock") end,
-        date = os.date,
+        date = function(fmt, time)
+            if type(fmt) == "string" and fmt:sub(1, 1) == "?" then
+                local d = oldos.date("!" .. fmt:sub(2), time or oldos.epoch "ingame" / 1000)
+                if type(d) == "table" then d.year = d.year - 1970 end
+                return d
+            else return oldos.date(fmt, time) end
+        end,
         difftime = function(a, b) return a - b end,
         execute = function(path)
             do_syscall("exec", "/bin/sh", "-c", path)
@@ -487,6 +493,8 @@ function createLuaLib(process)
             else return "C" end
         end,
         time = function(t)
+            if t == "ingame" then return oldos.epoch "ingame" / 1000
+            elseif t == "nano" then return oldos.epoch "nano" end
             expect(1, t, "table", "nil")
             if t then return oldos.time(t)
             else return oldos.epoch "utc" / 1000 end

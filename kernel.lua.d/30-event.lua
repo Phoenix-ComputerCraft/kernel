@@ -75,7 +75,7 @@ end
 
 function syscalls.cancel(process, thread, tm)
     expect(1, tm, "number")
-    if bit32.band(tm, 0x80000000) then
+    if bit32.btest(tm, 0x80000000) then
         tm = bit32.band(tm, 0x7FFFFFFF)
         if alarmMap[tm] ~= process then error("No such alarm") end
         os.cancelAlarm(tm)

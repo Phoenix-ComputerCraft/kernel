@@ -104,13 +104,14 @@ function syscalls.chdir(process, thread, dir)
 end
 
 function syscalls.getuser(process, thread)
-    return process.user
+    return process.user, process.realuser
 end
 
 function syscalls.setuser(process, thread, user)
     expect(1, user, "string")
     if process.user ~= "root" then error("Permission denied") end
     process.user = user
+    process.realuser = nil
 end
 
 function syscalls.fork(process, thread, func, name, ...)
@@ -199,7 +200,7 @@ function syscalls.exec(process, thread, path, ...)
     end
     local stat = filesystem.stat(process, path)
     if not (stat.permissions[stat.owner] or stat.worldPermissions).execute then error("Could not execute file: Permission denied", 0) end
-    if stat.setuser then process.user = stat.owner end
+    if stat.setuser then process.realuser, process.user = process.user, stat.owner end
     if contents:sub(1, 2) == "#!" then
         local command = contents:sub(3, contents:find("\n") - 1)
         local args, i = {}, 0
@@ -209,11 +210,11 @@ function syscalls.exec(process, thread, path, ...)
         syscalls.exec(process, thread, args[0], table.unpack(args, 1, i - 1))
         local f = filesystem.open(process, path, "rb")
         process.stdin = {read = function(n) if n then return f.read(n) else return f.readLine() end end}
-        process.name = path
+        process.name = "/" .. fs.combine(path:sub(1, 1) == "/" and "" or process.dir, path)
     else
-        local func, err = load(contents, "@" .. path, "bt")
+        local func, err = load(contents, "@" .. path, "bt", process.env)
         if not func then error("Could not execute file: " .. err, 0) end
-        process.name = fs.combine(path:sub(1, 1) == "/" and "" or process.dir, path)
+        process.name = "/" .. fs.combine(path:sub(1, 1) == "/" and "" or process.dir, path)
         process.threads = {
             [0] = {
                 id = 0,
@@ -224,7 +225,6 @@ function syscalls.exec(process, thread, path, ...)
                 filter = nil,
             }
         }
-        setfenv(func, process.env)
         if args.preemptive then debug.sethook(process.threads[0].coro, preempt_hook, "", args.quantum) end
     end
 end
@@ -277,6 +277,7 @@ function syscalls.getpinfo(process, thread, pid)
         id = p.id,
         name = p.name,
         user = p.user,
+        realuser = p.realuser,
         parent = p.parent,
         dir = p.dir,
         stdin = stdin,
