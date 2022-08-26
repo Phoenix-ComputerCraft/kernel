@@ -58,15 +58,27 @@ function reap_process(process)
     -- TODO: finish this
     syslog.debug("Reaping process " .. process.id .. " (" .. process.name .. ")")
     for _, v in ipairs(process.dependents) do v:gc() end
-    if process.stdin and process.stdin.isTTY and process.stdin.frontmostProcess == process then
-        process.stdin.frontmostProcess = table.remove(process.stdin.processList)
-        process.stdin.preBuffer = ""
+    if process.stdin and process.stdin.isTTY then
+        if process.stdin.frontmostProcess == process then
+            process.stdin.frontmostProcess = table.remove(process.stdin.processList)
+            process.stdin.preBuffer = ""
+        else for i, v in ipairs(process.stdin.processList) do
+            if v == process then table.remove(process.stdin.processList, i) break end
+        end end
     end
-    if process.stdout and process.stdout.isTTY and process.stdout.frontmostProcess == process then
-        process.stdout.frontmostProcess = table.remove(process.stdout.processList)
+    if process.stdout and process.stdout.isTTY then
+        if process.stdout.frontmostProcess == process then
+            process.stdout.frontmostProcess = table.remove(process.stdout.processList)
+        else for i, v in ipairs(process.stdout.processList) do
+            if v == process then table.remove(process.stdout.processList, i) break end
+        end end
     end
-    if process.stderr and process.stdout.isTTY and process.stdout.frontmostProcess == process then
-        process.stdout.frontmostProcess = table.remove(process.stdout.processList)
+    if process.stderr and process.stderr.isTTY then
+        if process.stderr.frontmostProcess == process then
+            process.stderr.frontmostProcess = table.remove(process.stderr.processList)
+        else for i, v in ipairs(process.stderr.processList) do
+            if v == process then table.remove(process.stderr.processList, i) break end
+        end end
     end
 end
 
@@ -165,16 +177,16 @@ function syscalls.fork(process, thread, func, name, ...)
     }
     processes[id].env = mkenv(processes[id])
     setfenv(func, processes[id].env)
-    if process.stdin and process.stdin.isTTY then
+    if process.stdin and process.stdin.isTTY and not process.stdin.isLocked then
         process.stdin.processList[#process.stdin.processList+1] = process.stdin.frontmostProcess
         process.stdin.frontmostProcess = processes[id]
         process.stdin.preBuffer = ""
     end
-    if process.stdout and process.stdout.isTTY and process.stdout.frontmostProcess ~= processes[id] then
+    if process.stdout and process.stdout.isTTY and not process.stdout.isLocked and process.stdout.frontmostProcess ~= processes[id] then
         process.stdout.processList[#process.stdout.processList+1] = process.stdout.frontmostProcess
         process.stdout.frontmostProcess = processes[id]
     end
-    if process.stderr and process.stderr.isTTY and process.stderr.frontmostProcess ~= processes[id] then
+    if process.stderr and process.stderr.isTTY and not process.stderr.isLocked and process.stderr.frontmostProcess ~= processes[id] then
         process.stderr.processList[#process.stderr.processList+1] = process.stderr.frontmostProcess
         process.stderr.frontmostProcess = processes[id]
     end

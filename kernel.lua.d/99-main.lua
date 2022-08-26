@@ -25,7 +25,7 @@ local allWaiting = false
 -- TODO: Improve this A LOT!
 eventHooks.key = eventHooks.key or {}
 eventHooks.key[#eventHooks.key+1] = function(ev)
-    if ev[2] == keys.f10 then
+    if keysHeld.ctrl and keysHeld.shift and ev[2] == keys.f10 then
         term.clear()
         term.setCursorPos(1, 1)
         term.write("Entering debug console.")
@@ -43,12 +43,12 @@ eventHooks.key[#eventHooks.key+1] = function(ev)
                     line = line .. ev[2]
                     term.write(ev[2])
                 elseif ev[1] == "key" then
-                    if ev[2] == 14 and #line > 0 then -- backspace
+                    if ev[2] == keys.backspace and #line > 0 then -- backspace
                         line = line:sub(1, -2)
                         term.setCursorPos(term.getCursorPos() - 1, y)
                         term.write(" ")
                         term.setCursorPos(term.getCursorPos() - 1, y)
-                    elseif ev[2] == 28 then -- enter
+                    elseif ev[2] == keys.enter then -- enter
                         break
                     end
                 end
@@ -98,6 +98,7 @@ eventHooks.key[#eventHooks.key+1] = function(ev)
         end
         term.setCursorBlink(false)
         term.clear()
+        terminal.redraw(currentTTY, true)
     end
 end
 

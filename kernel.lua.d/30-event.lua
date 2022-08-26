@@ -95,30 +95,17 @@ end
 eventParameterMap = {
     alarm = {"id"},
     char = {"character"},
-    disk = {"side"},
-    disk_eject = {"side"},
-    http_check = {"url", "isValid", "error"},
-    http_failure = {"url", "error", "handle"},
-    http_success = {"url", "handle"},
     key = {"keycode", "isRepeat"},
     key_up = {"keycode"},
-    monitor_resize = {"side"},
-    monitor_touch = {"side", "x", "y"},
     mouse_click = {"button", "x", "y"},
     mouse_drag = {"button", "x", "y"},
     mouse_up = {"button", "x", "y"},
     mouse_scroll = {"direction", "x", "y"},
     paste = {"text"},
-    peripheral = {"side"},
-    peripheral_detach = {"side"},
     redstone = {},
     term_resize = {},
     timer = {"id"},
-    turtle_inventory = {},
-    websocket_closed = {"url"},
-    websocket_failure = {"url", "error"},
-    websocket_success = {"url", "handle"},
-    websocket_message = {"url", "message", "isBinary"}
+    turtle_inventory = {}
 }
 
 do

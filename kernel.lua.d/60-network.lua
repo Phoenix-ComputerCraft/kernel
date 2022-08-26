@@ -880,6 +880,7 @@ end
 
 -- TODO: Fix handle:read() not being equivalent to handle:read("*l")
 
+local request = http.request
 local function httpHandler(process, options)
     expect.field(options, "encoding", "string", "nil")
     expect.field(options, "headers", "table", "nil")
@@ -931,7 +932,7 @@ local function httpHandler(process, options)
             for _, v in ipairs{...} do data = data .. tostring(v) end
         end
         local url = options.url .. "#" .. info.id
-        local ok, err = http.request{url = url, body = data, headers = options.headers, binary = options.encoding == "binary", method = options.method, redirect = options.redirect}
+        local ok, err = request{url = url, body = data, headers = options.headers, binary = options.encoding == "binary", method = options.method, redirect = options.redirect}
         if ok then
             httpRequests[url] = info
             info.status = "connecting"

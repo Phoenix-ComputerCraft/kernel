@@ -153,7 +153,7 @@ function filesystems.craftos:setmeta(user, path, meta)
         if meta.type ~= "directory" then t.contents = nil end
     else stack[#stack].contents[name] = nil end
     local file = fs.open("/meta.ltn", "w")
-    file.write(serialize(self.meta))
+    file.write(serialize(self.meta, {compact = true}))
     file.close()
 end
 
@@ -181,8 +181,10 @@ function filesystems.craftos:open(process, path, mode)
                 pstat = self:stat(process, fs.getDir(path))
                 if not pstat then return nil, "Could not stat " .. fs.getDir(path) end
             end
-            local perms = pstat.permissions[process.user] or pstat.worldPermissions
-            if not perms.write then return nil, "Permission denied" end
+            if process.user ~= "root" then
+                local perms = pstat.permissions[process.user] or pstat.worldPermissions
+                if not perms.write then return nil, "Permission denied" end
+            end
             local meta = {
                 type = "file",
                 owner = process.user,
@@ -209,14 +211,17 @@ end
 function filesystems.craftos:list(process, path)
     local stat = self:stat(process, path)
     if not stat or stat.type ~= "directory" then error(path .. ": Not a directory", 2) end
-    local perms = stat.permissions[process.user] or stat.worldPermissions
-    if not perms.read then error(path .. ": Permission denied", 2) end
+    if process.user ~= "root" then
+        local perms = stat.permissions[process.user] or stat.worldPermissions
+        if not perms.read then error(path .. ": Permission denied", 2) end
+    end
     return fs.list(fs.combine(self.path, path))
 end
 
+-- TODO: Block access when a parent directory isn't readable
 function filesystems.craftos:stat(process, path)
     local p = fs.combine(self.path, path)
-    if not p:find(self.path:gsub("^/", ""):gsub("/$", ""), 1, false) then return nil end
+    if p:find(self.path:gsub("^/", ""):gsub("/$", ""), 1, false) ~= 1 then return nil end
     local ok, attr = pcall(fs.attributes, p)
     if not ok or not attr then return nil end
     attr.type = attr.isDir and "directory" or "file"
@@ -260,9 +265,9 @@ function filesystems.craftos:remove(process, path)
     local function checkWriteRecursive(p)
         local s = self:stat(process, p)
         local perms = s.permissions[process.user] or s.worldPermissions
-        if not perms.write then error(p .. ": Permission denied", 3) end
+        if process.user ~= "root" and not perms.write then error(p .. ": Permission denied", 3) end
         if s.type == "directory" then
-            if not perms.read then error(p .. ": Permission denied", 3) end
+            if process.user ~= "root" and not perms.read then error(p .. ": Permission denied", 3) end
             for _, v in ipairs(fs.list(fs.combine(self.path, p))) do checkWriteRecursive(fs.combine(p, v)) end
         end
     end
@@ -282,8 +287,10 @@ function filesystems.craftos:rename(process, from, to)
         self:mkdir(process, fs.getDir(to))
         tostat = self:stat(process, fs.getDir(to))
     end
-    local perms = tostat.permissions[process.user] or tostat.worldPermissions
-    if not perms.write then error(to .. ": Permission denied", 2) end
+    if process.user ~= "root" then
+        local perms = tostat.permissions[process.user] or tostat.worldPermissions
+        if not perms.write then error(to .. ": Permission denied", 2) end
+    end
     fs.move(fs.combine(self.path, from), fs.combine(self.path, to))
     self:setmeta(process.user, fs.combine(self.path, to), self:getmeta(process.user, fs.combine(self.path, from)))
     self:setmeta(process.user, fs.combine(self.path, from), nil)
@@ -306,8 +313,12 @@ function filesystems.craftos:mkdir(process, path)
         end
         i=i-1
     until stat or i <= 0
-    local perms = stat.permissions[process.user] or stat.worldPermissions
-    if not perms.write then error(path .. ": Permission denied", 2) end
+    if path:match "^/" then stat = assert(self:stat(process, "/"))
+    else stat = assert(self:stat(process, process.dir)) end
+    if process.user ~= "root" then
+        local perms = stat.permissions[process.user] or stat.worldPermissions
+        if not perms.write then error(path .. ": Permission denied", 2) end
+    end
     local meta = {
         type = "directory",
         owner = process.user,
@@ -333,10 +344,10 @@ function filesystems.craftos:chmod(process, path, user, mode)
     local perms
     if user == nil then perms = stat.worldPermissions
     else
-        perms = stat.permissions[process.user]
+        perms = stat.permissions[user]
         if not perms then
             perms = deepcopy(stat.worldPermissions)
-            stat.permissions[process.user] = perms
+            stat.permissions[user] = perms
         end
     end
     if type(mode) == "string" then
@@ -372,10 +383,10 @@ function filesystems.craftos:chmod(process, path, user, mode)
             stat.setuser = mode:sub(3, 3) == "s"
         end
     elseif type(mode) == "number" then
-        stat.setuser = bit32.band(mode, 8)
-        perms.read = bit32.band(mode, 4)
-        perms.write = bit32.band(mode, 2)
-        perms.execute = bit32.band(mode, 1)
+        stat.setuser = bit32.btest(mode, 8)
+        perms.read = bit32.btest(mode, 4)
+        perms.write = bit32.btest(mode, 2)
+        perms.execute = bit32.btest(mode, 1)
     else
         if mode.read ~= nil then perms.read = mode.read end
         if mode.write ~= nil then perms.write = mode.write end
@@ -440,8 +451,10 @@ function filesystems.tmpfs:setpath(user, path, data)
         --if t and t.meta.type == "link" then t = ? end
     end
     if t.type ~= "directory" then error("Not a directory", 2)
-    elseif t.permissions[user] then if not t.permissions[user].execute then error("Permission denied", 2) end
-    elseif not t.worldPermissions.execute then error("Permission denied", 2) end
+    elseif user ~= "root" then
+        if t.permissions[user] then if not t.permissions[user].execute then error("Permission denied", 2) end
+        elseif not t.worldPermissions.execute then error("Permission denied", 2) end
+    end
     t.contents[last] = data
 end
 
@@ -460,15 +473,16 @@ function filesystems.tmpfs:new(process, src, options)
     }, {__index = self})
 end
 
-function filesystems.tmpfs:_open_internal(user, path, mode)
-    local pos = 0
+function filesystems.tmpfs:_open_internal(process, path, mode)
+    local pos = 1
     local closed = false
     local function setenv(t)
         for _, v in pairs(t) do setfenv(v, process.env) debug.protect(v) end
         return setmetatable(t, {__name = "file"})
     end
+    local epoch = os.epoch
     if mode == "r" then
-        local data = self:getpath(user, path).data
+        local data = self:getpath(process.user, path).data
         return setenv {
             readLine = function(newline)
                 if closed then error("attempt to use a closed file", 2) end
@@ -499,8 +513,8 @@ function filesystems.tmpfs:_open_internal(user, path, mode)
             end
         }
     elseif mode == "w" or mode == "a" then
-        local data = self:getpath(user, path)
-        if mode == "w" then data.data, data.modified = "", os.epoch "utc" else pos = #data.data end
+        local data = self:getpath(process.user, path)
+        if mode == "w" then data.data, data.modified = "", epoch "utc" else pos = #data.data end
         local buf = data.data
         return setenv {
             write = function(d)
@@ -513,16 +527,16 @@ function filesystems.tmpfs:_open_internal(user, path, mode)
             end,
             flush = function()
                 if closed then error("attempt to use a closed file", 2) end
-                data.data, data.modified = buf, os.epoch "utc"
+                data.data, data.modified = buf, epoch "utc"
             end,
             close = function()
                 if closed then error("attempt to use a closed file", 2) end
-                data.data, data.modified = buf, os.epoch "utc"
+                data.data, data.modified = buf, epoch "utc"
                 closed = true
             end
         }
     elseif mode == "rb" then
-        local data = self:getpath(user, path).data
+        local data = self:getpath(process.user, path).data
         return setenv {
             readLine = function(newline)
                 if closed then error("attempt to use a closed file", 2) end
@@ -558,11 +572,11 @@ function filesystems.tmpfs:_open_internal(user, path, mode)
                 whence = whence or "cur"
                 offset = offset or 0
                 if closed then error("attempt to use closed file", 2) end
-                if whence == "set" then pos = offset
+                if whence == "set" then pos = offset + 1
                 elseif whence == "cur" then pos = pos + offset
-                elseif whence == "end" then pos = #data - offset
+                elseif whence == "end" then pos = math.max(#data - offset, 1)
                 else error("Invalid whence", 2) end
-                return pos
+                return pos - 1
             end,
             close = function()
                 if closed then error("attempt to use a closed file", 2) end
@@ -570,20 +584,20 @@ function filesystems.tmpfs:_open_internal(user, path, mode)
             end
         }
     elseif mode == "wb" or mode == "ab" then
-        local data = self:getpath(user, path)
-        if mode == "wb" then data.data, data.modified = "", os.epoch "utc" else pos = #data.data end
+        local data = self:getpath(process.user, path)
+        if mode == "wb" then data.data, data.modified = "", epoch "utc" else pos = #data.data end
         local buf = data.data
         return setenv {
             write = function(d)
                 if closed then error("attempt to use a closed file", 2) end
-                if type(d) == "number" then buf = buf:sub(1, pos - 1) .. string.char(d) .. buf:sub(pos + 1)
-                elseif type(d) == "string" then buf = buf:sub(1, pos - 1) .. d .. buf:sub(pos + #d)
+                if type(d) == "number" then buf, pos = buf:sub(1, pos - 1) .. string.char(d) .. buf:sub(pos + 1), pos + 1
+                elseif type(d) == "string" then buf, pos = buf:sub(1, pos - 1) .. d .. buf:sub(pos + #d), pos + #d
                 else error("bad argument #1 (expected string or number, got " .. type(d) .. ")", 2) end
             end,
             writeLine = function(d)
                 if closed then error("attempt to use a closed file", 2) end
-                if type(d) == "number" then buf = buf:sub(1, pos - 1) .. string.char(d) .. "\n" .. buf:sub(pos + 2)
-                elseif type(d) == "string" then buf = buf:sub(1, pos - 1) .. d .. "\n" .. buf:sub(pos + #d + 1)
+                if type(d) == "number" then buf, pos = buf:sub(1, pos - 1) .. string.char(d) .. "\n" .. buf:sub(pos + 2), pos + 2
+                elseif type(d) == "string" then buf, pos = buf:sub(1, pos - 1) .. d .. "\n" .. buf:sub(pos + #d + 1), pos + #d + 1
                 else error("bad argument #1 (expected string or number, got " .. type(d) .. ")", 2) end
             end,
             seek = function(whence, offset)
@@ -592,19 +606,19 @@ function filesystems.tmpfs:_open_internal(user, path, mode)
                 whence = whence or "cur"
                 offset = offset or 0
                 if closed then error("attempt to use closed file", 2) end
-                if whence == "set" then pos = offset
+                if whence == "set" then pos = offset + 1
                 elseif whence == "cur" then pos = pos + offset
-                elseif whence == "end" then pos = #buf - offset
+                elseif whence == "end" then pos = math.max(#buf - offset, 1)
                 else error("Invalid whence", 2) end
-                return pos
+                return pos - 1
             end,
             flush = function()
                 if closed then error("attempt to use a closed file", 2) end
-                data.data, data.modified = buf, os.epoch "utc"
+                data.data, data.modified = buf, epoch "utc"
             end,
             close = function()
                 if closed then error("attempt to use a closed file", 2) end
-                data.data, data.modified = buf, os.epoch "utc"
+                data.data, data.modified = buf, epoch "utc"
                 closed = true
             end
         }
@@ -622,8 +636,10 @@ function filesystems.tmpfs:open(process, path, mode)
                 if not mok then return nil, err:gsub("kernel:%d: ", "") end
                 pstat = self:stat(process, fs.getDir(path))
             end
-            local perms = pstat.permissions[process.user] or pstat.worldPermissions
-            if not perms.write then return nil, "Permission denied" end
+            if process.user ~= "root" then
+                local perms = pstat.permissions[process.user] or pstat.worldPermissions
+                if not perms.write then return nil, "Permission denied" end
+            end
             local meta = {
                 type = "file",
                 owner = process.user,
@@ -639,20 +655,24 @@ function filesystems.tmpfs:open(process, path, mode)
             meta.permissions[pstat.owner] = nil
             meta.permissions[process.user] = t
             self:setpath(process.user, path, meta)
-            return self:_open_internal(process.user, path, mode)
+            return self:_open_internal(process, path, mode)
         else return nil, "File not found" end
     elseif stat.type == "directory" then return nil, "Is a directory" end
-    local perms = stat.permissions[process.user] or stat.worldPermissions
-    --syslog.debug(path, mode, perms.read, perms.write, perms.execute)
-    if (mode:sub(1, 1) == "r" and not perms.read) or ((mode:sub(1, 1) == "w" or mode:sub(1, 1) == "a") and not perms.write) then return nil, "Permission denied" end
-    return self:_open_internal(process.user, path, mode)
+    if process.user ~= "root" then
+        local perms = stat.permissions[process.user] or stat.worldPermissions
+        --syslog.debug(path, mode, perms.read, perms.write, perms.execute)
+        if (mode:sub(1, 1) == "r" and not perms.read) or ((mode:sub(1, 1) == "w" or mode:sub(1, 1) == "a") and not perms.write) then return nil, "Permission denied" end
+    end
+    return self:_open_internal(process, path, mode)
 end
 
 function filesystems.tmpfs:list(process, path)
     local data = self:getpath(process.user, path)
     if not data or data.type ~= "directory" then error(path .. ": Not a directory", 2) end
-    local perms = data.permissions[process.user] or data.worldPermissions
-    if not perms.read then error(path .. ": Permission denied", 2) end
+    if process.user ~= "root" then
+        local perms = data.permissions[process.user] or data.worldPermissions
+        if not perms.read then error(path .. ": Permission denied", 2) end
+    end
     local retval = {}
     for k in pairs(data.contents) do retval[#retval+1] = k end
     table.sort(retval)
@@ -681,14 +701,14 @@ function filesystems.tmpfs:remove(process, path)
     local parent = self:getpath(process.user, fs.getDir(path))
     local name = fs.getName(path)
     if not parent or parent.type ~= "directory" or not parent.contents[name] then return end
-    if not (parent.permissions[process.user] or parent.worldPermissions).write then error(path .. ": Permission denied", 2) end
+    if process.user ~= "root" and not (parent.permissions[process.user] or parent.worldPermissions).write then error(path .. ": Permission denied", 2) end
     local data = parent.contents[name]
-    if not (data.permissions[process.user] or data.worldPermissions).write then error(path .. ": Permission denied", 2) end
+    if process.user ~= "root" and not (data.permissions[process.user] or data.worldPermissions).write then error(path .. ": Permission denied", 2) end
     local function checkWriteRecursive(s)
         local perms = s.permissions[process.user] or s.worldPermissions
-        if not perms.write then error(path .. ": Permission denied", 3) end
+        if process.user ~= "root" and not perms.write then error(path .. ": Permission denied", 3) end
         if s.type == "directory" then
-            if not perms.read then error(path .. ": Permission denied", 3) end
+            if process.user ~= "root" and not perms.read then error(path .. ": Permission denied", 3) end
             for _, v in pairs(s.contents) do checkWriteRecursive(v) end
         end
     end
@@ -701,13 +721,13 @@ function filesystems.tmpfs:rename(process, from, to)
     local fparent = self:getpath(process.user, fs.getDir(from))
     local fname = fs.getName(from)
     if not fparent or fparent.type ~= "directory" or not fparent.contents[fname] then error(from .. ": No such file or directory", 2) end
-    if not (fparent.permissions[process.user] or fparent.worldPermissions).write then error(from .. ": Permission denied", 2) end
+    if process.user ~= "root" and not (fparent.permissions[process.user] or fparent.worldPermissions).write then error(from .. ": Permission denied", 2) end
     local fdata = fparent.contents[fname]
-    if not (fdata.permissions[process.user] or fdata.worldPermissions).write then error(from .. ": Permission denied", 2) end
+    if process.user ~= "root" and not (fdata.permissions[process.user] or fdata.worldPermissions).write then error(from .. ": Permission denied", 2) end
     local tparent = self:getpath(process.user, fs.getDir(to))
     local tname = fs.getName(to)
     if not tparent or tparent.type ~= "directory" then error(to .. ": No such file or directory", 2) end
-    if not (tparent.permissions[process.user] or tparent.worldPermissions).write then error(to .. ": Permission denied", 2) end
+    if process.user ~= "root" and not (tparent.permissions[process.user] or tparent.worldPermissions).write then error(to .. ": Permission denied", 2) end
     local tdata = tparent.contents[tname]
     if tdata then error(to .. ": File already exists", 2) end
     tparent.contents[tname], fparent.contents[fname] = fdata, nil
@@ -720,9 +740,9 @@ function filesystems.tmpfs:mkdir(process, path)
     for _,p in ipairs(split(path, "/\\")) do
         local perms = t.permissions[process.user] or t.worldPermissions
         if t.type ~= "directory" then error(path .. ": File exists", 2)
-        elseif not perms.execute then error(path .. ": Permission denied", 2) end
+        elseif process.user ~= "root" and not perms.execute then error(path .. ": Permission denied", 2) end
         if not t.contents[p] then
-            if not perms.write then error(path .. ": Permission denied", 2) end
+            if process.user ~= "root" and not perms.write then error(path .. ": Permission denied", 2) end
             t.contents[p] = { -- Initialize with default directory meta if not present
                 type = "directory",
                 owner = t.owner,
@@ -747,10 +767,10 @@ function filesystems.tmpfs:chmod(process, path, user, mode)
     local perms
     if user == nil then perms = stat.worldPermissions
     else
-        perms = stat.permissions[process.user]
+        perms = stat.permissions[user]
         if not perms then
             perms = deepcopy(stat.worldPermissions)
-            stat.permissions[process.user] = perms
+            stat.permissions[user] = perms
         end
     end
     if type(mode) == "string" then
@@ -786,10 +806,10 @@ function filesystems.tmpfs:chmod(process, path, user, mode)
             stat.setuser = mode:sub(3, 3) == "s"
         end
     elseif type(mode) == "number" then
-        stat.setuser = bit32.band(mode, 8)
-        perms.read = bit32.band(mode, 4)
-        perms.write = bit32.band(mode, 2)
-        perms.execute = bit32.band(mode, 1)
+        stat.setuser = bit32.btest(mode, 8)
+        perms.read = bit32.btest(mode, 4)
+        perms.write = bit32.btest(mode, 2)
+        perms.execute = bit32.btest(mode, 1)
     else
         if mode.read ~= nil then perms.read = mode.read end
         if mode.write ~= nil then perms.write = mode.write end

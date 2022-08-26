@@ -784,6 +784,9 @@ function terminal.openterm(tty, process)
         buffer.dirtyPalette[i] = true
     end
 
+    tty.processList[#tty.processList+1] = tty.frontmostProcess
+    tty.frontmostProcess = process
+
     local win = setmetatable({}, {__name = "Terminal"})
     local redraw = terminal.redraw
     local expect = expect
@@ -792,6 +795,7 @@ function terminal.openterm(tty, process)
         if not win then error("terminal is already closed", 2) end
         win = nil
         tty.isLocked = false
+        tty.frontmostProcess = table.remove(tty.processList)
         redraw(tty, true)
     end
 
@@ -1014,6 +1018,9 @@ function terminal.opengfx(tty, process)
         buffer.dirtyPalette[i] = true
     end
 
+    tty.processList[#tty.processList+1] = tty.frontmostProcess
+    tty.frontmostProcess = process
+
     local win = setmetatable({}, {__name = "GFXTerminal"})
     local redraw = terminal.redraw
     local expect = expect
@@ -1022,6 +1029,7 @@ function terminal.opengfx(tty, process)
         if not win then error("terminal is already closed", 2) end
         win = nil
         tty.isLocked = false
+        tty.frontmostProcess = table.remove(tty.processList)
         redraw(tty, true)
     end
 

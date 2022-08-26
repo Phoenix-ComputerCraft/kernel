@@ -858,8 +858,8 @@ function executeThread(process, thread, ev, dead, allWaiting)
             allWaiting = false
         elseif coroutine.status(thread.coro) == "dead" then
             thread.status = "dead"
-            if process[1] then process.lastReturnValue = {pid = process.id, thread = thread.id, value = params[2], n = params.n - 1, table.unpack(params, 2, params.n)}
-            else process.lastReturnValue = {pid = process.id, thread = thread.id, error = process[2], traceback = debug.traceback(thread.coro)} end
+            if params[1] then process.lastReturnValue = {pid = process.id, thread = thread.id, value = params[2], n = params.n - 1, table.unpack(params, 2, params.n)}
+            else process.lastReturnValue = {pid = process.id, thread = thread.id, error = params[2], traceback = debug.traceback(thread.coro)} end
             if not params[1] then
                 thread.did_error = true
                 syslog.log({level = _G.args.traceback and "error" or "debug", process = process.id, thread = thread.id, category = "Application Error", traceback = true}, debug.traceback(thread.coro, params[2]))
@@ -907,6 +907,7 @@ for _,v in ipairs({...}) do
         if type(args[key]) == "boolean" then args[key] = value:lower() == "true" or value == "1"
         elseif type(args[key]) == "number" then args[key] = tonumber(value)
         else args[key] = value end
+    elseif key == "silent" then args.loglevel = 5
     end
 end
 
