@@ -53,6 +53,7 @@ end
 -- @tparam Process process The process to make the functions for
 -- @tparam _G G The global environment to install in
 function createRequire(process, G)
+    local loaded, preload = {}, {}
     G.package = {}
     local oldenv = processes[process.parent] and processes[process.parent].env
     if oldenv then
@@ -62,10 +63,10 @@ function createRequire(process, G)
     G.package.path = G.package.path or "/lib/?.lua;/lib/?/init.lua;/usr/lib/?.lua;/usr/lib/?/init.lua;./?.lua;./?/init.lua"
     G.package.libpath = G.package.libpath or "/lib/lib?.a;/usr/lib/lib?.a"
     G.package.config = "/\n;\n?\n!\n-"
-    G.package.loaded = {}
-    G.package.preload = {}
+    G.package.loaded = loaded
+    G.package.preload = preload
     G.package.forceload = false
-    for k, v in pairs(G) do if type(v) == "table" then G.package.loaded[k] = v end end
+    for k, v in pairs(G) do if type(v) == "table" then loaded[k] = v end end
 
     local sentinel = setmetatable({}, {__newindex = function() end, __metatable = false})
     local localLoaders = {}
@@ -146,7 +147,7 @@ function createRequire(process, G)
 
     G.package.searchers = {
         function(name)
-            local p = package.preload[name]
+            local p = preload[name]
             if p then return p else return nil, "\tpackage.preload['" .. name .. "']: No such field\n" end
         end,
         function(name)
@@ -190,30 +191,30 @@ function createRequire(process, G)
         end
         if not loader then error(err, 2) end
         if pathname then
-            if package.loaded[pathname] then
-                if package.loaded[pathname] == sentinel then error("loop detected loading '" .. name .. "'", 3)
-                elseif not package.forceload then return package.loaded[pathname] end
+            if loaded[pathname] then
+                if loaded[pathname] == sentinel then error("loop detected loading '" .. name .. "'", 3)
+                elseif not package.forceload then return loaded[pathname] end
             end
-            package.loaded[pathname] = sentinel
+            loaded[pathname] = sentinel
         else
-            if package.loaded[name] then
-                if package.loaded[name] == sentinel then error("loop detected loading '" .. name .. "'", 3)
-                elseif not package.forceload then return package.loaded[name] end
+            if loaded[name] then
+                if loaded[name] == sentinel then error("loop detected loading '" .. name .. "'", 3)
+                elseif not package.forceload then return loaded[name] end
             end
         end
-        package.loaded[name] = sentinel
+        loaded[name] = sentinel
         local ok, res = pcall(loader, name, arg)
         if ok then
-            if res ~= nil then package.loaded[name] = res
-            elseif package.loaded[name] == sentinel then package.loaded[name] = true end
+            if res ~= nil then loaded[name] = res
+            elseif loaded[name] == sentinel then loaded[name] = true end
             if pathname then
-                if res ~= nil then package.loaded[pathname] = res
-                elseif package.loaded[pathname] == sentinel then package.loaded[pathname] = true end
+                if res ~= nil then loaded[pathname] = res
+                elseif loaded[pathname] == sentinel then loaded[pathname] = true end
             end
-            return package.loaded[name]
+            return loaded[name]
         else
-            package.loaded[name] = nil
-            if pathname then package.loaded[pathname] = nil end
+            loaded[name] = nil
+            if pathname then loaded[pathname] = nil end
             error(err .. "\t" .. res .. "\n", 2)
         end
     end

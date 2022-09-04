@@ -1,3 +1,6 @@
+--- filesystem
+-- @section filesystem
+
 --[[
     CraftOS mount metadata is stored in the following format: {
         meta = {
@@ -193,9 +196,11 @@ function filesystems.craftos:open(process, path, mode)
                 setuser = false
             }
             -- We do a swap here so it doesn't break if pstat.owner == process.user
-            local t = meta.permissions[pstat.owner]
-            meta.permissions[pstat.owner] = nil
-            meta.permissions[process.user] = t
+            if pstat.owner then
+                local t = meta.permissions[pstat.owner]
+                meta.permissions[pstat.owner] = nil
+                meta.permissions[process.user] = t
+            end
             self:setmeta(process.user, fs.combine(self.path, path), meta)
             local file, err = fs.open(fs.combine(self.path, path), mode)
             if not file then return file, err end
@@ -229,6 +234,8 @@ function filesystems.craftos:stat(process, path)
     attr.isDir = nil
     if not attr.modified then attr.modified = attr.modification end
     attr.modification = nil
+    attr.capacity = fs.getCapacity(p)
+    attr.freeSpace = fs.getFreeSpace(p)
     if attr.isReadOnly then
         -- If the file is read-only, it's from the ROM so permissions can't be set
         -- No owner
@@ -237,8 +244,6 @@ function filesystems.craftos:stat(process, path)
         return attr
     end
     attr.isReadOnly = nil
-    attr.capacity = fs.getCapacity(p)
-    attr.freeSpace = fs.getFreeSpace(p)
     local meta = self:getmeta(process.user, fs.combine(self.path, path))
     -- The path may exist on the filesystem but have no metadata.
     if meta then
@@ -325,9 +330,11 @@ function filesystems.craftos:mkdir(process, path)
         permissions = deepcopy(stat.permissions),
         worldPermissions = deepcopy(stat.worldPermissions)
     }
-    local t = meta.permissions[stat.owner]
-    meta.permissions[stat.owner] = nil
-    meta.permissions[process.user] = t
+    if stat.owner then
+        local t = meta.permissions[stat.owner]
+        meta.permissions[stat.owner] = nil
+        meta.permissions[process.user] = t
+    end
     i=i+1
     while i <= #parts do
         self:setmeta(process.user, fs.combine(self.path, table.concat(parts, 1, i)), deepcopy(meta))
@@ -1003,7 +1010,7 @@ function filesystem.mount(process, type, src, dest, options)
     local stat = filesystem.stat(process, dest)
     if not stat then error("Could not mount to " .. dest .. ": No such directory", 2)
     elseif stat.type ~= "directory" then error("Could not mount to " .. dest .. ": Not a directory", 2)
-    elseif not (stat.permissions[process.user] or stat.worldPermissions).write then error("Could not mount to " .. dest .. ": Permission denied", 2) end
+    elseif process.user ~= "root" and not (stat.permissions[process.user] or stat.worldPermissions).write then error("Could not mount to " .. dest .. ": Permission denied", 2) end
     local mount = filesystems[type]:new(process, src, options or {})
     mounts[fs.combine(dest)] = mount
 end
@@ -1018,7 +1025,7 @@ function filesystem.unmount(process, path)
     if not mounts[fs.combine(path)] then error(path .. ": No such mount", 2) end
     local stat = mounts[fs.combine(path)]:stat(process, "")
     if not stat then error("Internal error in unmount: could not get stat for root! Please report this to the maintainer of the target filesystem.", 2)
-    elseif not (stat.permissions[process.user] or stat.worldPermissions).write then error(path .. ": Permission denied", 2) end
+    elseif process.user ~= "root" and not (stat.permissions[process.user] or stat.worldPermissions).write then error(path .. ": Permission denied", 2) end
     mounts[fs.combine(path)] = nil
 end
 

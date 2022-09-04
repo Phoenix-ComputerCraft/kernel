@@ -50,7 +50,7 @@ end
 
 -- load is the de facto loader - loadstring will no longer be available. Since load for strings isn't available on old versions of Lua/Cobalt, we shim it if necessary.
 if not pcall(load, "return", "=test", "t", {}) then
-    local old_load, old_loadstring, expect = load, loadstring, expect
+    local old_load, old_loadstring, expect, setfenv = load, loadstring, expect, setfenv
     function load(chunk, name, mode, env)
         expect(1, chunk, "string", "function")
         expect(2, name, "string", "nil")
@@ -802,7 +802,7 @@ function split(str, sep)
     return t
 end
 
-local procTime = pcall(os.epoch, "nano") and function() return os.epoch "nano" / 1000000 end or function() return os.epoch "utc" end
+local procTime = pcall(os.epoch, "nano") and function() return os.epoch "nano" / 1000000 end or (ccemux and function() return ccemux.nanoTime() / 1000000 end or function() return os.epoch "utc" end)
 
 local empty_packed_table = {n = 0}
 --- Resumes a thread's coroutine, handling different yield types.
@@ -899,6 +899,40 @@ function userModeCallback(process, func, ...)
         if thread.status == "suspended" then return false, "attempt to yield from a user mode callback" end
     end
     return not thread.did_error, thread.return_value
+end
+
+--- Creates a new _ENV shadow environment for a table. The resulting table can
+-- have its environment set through `t._ENV = val`.
+-- @tparam table env The environment table to use
+-- @treturn table A new _ENV-ized table
+function make_ENV(env)
+    if type(env) ~= "table" or _VERSION ~= "Lua 5.1" then return env end
+    repeat
+        local mt = getmetatable(env)
+        if mt and mt.__env then env = mt.__env end
+    until not mt or not mt.__env
+    local t = setmetatable({}, {
+        __index = function(self, idx)
+            if self == env then env = getmetatable(self).__env end -- ????????
+            if idx == "_ENV" then return env
+            else return env[idx] end
+        end,
+        __newindex = function(self, idx, val)
+            if self == env then env = getmetatable(self).__env end -- ????????
+            if idx == "_ENV" then env = val
+            else env[idx] = val end
+        end,
+        __pairs = function(self)
+            if self == env then env = getmetatable(self).__env end -- ????????
+            return next, env
+        end,
+        __len = function(self)
+            if self == env then env = getmetatable(self).__env end -- ????????
+            return #env
+        end,
+        __env = env
+    })
+    return t
 end
 
 for _,v in ipairs({...}) do

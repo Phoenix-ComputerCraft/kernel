@@ -31,19 +31,7 @@ local process_template = {
 
 local function mkenv(process)
     local env = createLuaLib(process)
-    if _VERSION < "Lua 5.2" then
-        -- Emulate _ENV environments on Lua 5.1
-        setmetatable(env, {
-            __index = function(self, idx)
-                if idx == "_ENV" then return getfenv(2) end
-                return nil
-            end,
-            __newindex = function(self, idx, val)
-                if idx == "_ENV" then setfenv(2, val) return end
-                rawset(self, idx, val)
-            end
-        })
-    end
+    if _VERSION < "Lua 5.2" then env = make_ENV(env) end
     env._G = env
     return env
 end
@@ -62,6 +50,7 @@ function reap_process(process)
         if process.stdin.frontmostProcess == process then
             process.stdin.frontmostProcess = table.remove(process.stdin.processList)
             process.stdin.preBuffer = ""
+            if discord and process.stdout == currentTTY then discord("Phoenix", "Executing " .. process.stdout.frontmostProcess.name) end
         else for i, v in ipairs(process.stdin.processList) do
             if v == process then table.remove(process.stdin.processList, i) break end
         end end
@@ -181,6 +170,7 @@ function syscalls.fork(process, thread, func, name, ...)
         process.stdin.processList[#process.stdin.processList+1] = process.stdin.frontmostProcess
         process.stdin.frontmostProcess = processes[id]
         process.stdin.preBuffer = ""
+        if discord and process.stdout == currentTTY then discord("Phoenix", "Executing " .. process.name) end
     end
     if process.stdout and process.stdout.isTTY and not process.stdout.isLocked and process.stdout.frontmostProcess ~= processes[id] then
         process.stdout.processList[#process.stdout.processList+1] = process.stdout.frontmostProcess
@@ -239,6 +229,7 @@ function syscalls.exec(process, thread, path, ...)
         }
         if args.preemptive then debug.sethook(process.threads[0].coro, preempt_hook, "", args.quantum) end
     end
+    if discord and process.stdin and process.stdin.isTTY and process.stdin.frontmostProcess == process then discord("Phoenix", "Executing " .. process.name) end
 end
 
 function syscalls.newthread(process, thread, func, ...)

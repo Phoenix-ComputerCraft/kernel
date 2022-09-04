@@ -69,8 +69,8 @@ end
 -- @treturn _G A new global table for the process
 function createLuaLib(process)
     local G = {}
-    for _,v in ipairs{"assert", "error", "getfenv", "getmetatable", "ipairs", "next",
-        "pairs", "pcall", "rawequal", "rawget", "rawset", "select", "setfenv",
+    for _,v in ipairs{"assert", "error", "getmetatable", "ipairs", "next",
+        "pairs", "pcall", "rawequal", "rawget", "rawset", "select",
         "setmetatable", "tonumber", "tostring", "type", "_VERSION", "xpcall", "collectgarbage"} do G[v] = _G[v] end
     -- TODO: remove collectgarbage!!!
 
@@ -86,30 +86,27 @@ function createLuaLib(process)
         return fn()
     end
 
-    local load = load
+    local load, getfenv, setfenv, make_ENV = load, getfenv, setfenv, make_ENV
     if _VERSION == "Lua 5.1" then
         function G.load(chunk, name, mode, env)
             -- Shadow environment table to add proper _ENV support
             -- TODO: Figure out if this could break anything
-            env = env or process.env
-            return load(chunk, name, mode, setmetatable({}, {
-                __index = function(_, idx)
-                    if idx == "_ENV" then return env
-                    else return env[idx] end
-                end,
-                __newindex = function(_, idx, val)
-                    if idx == "_ENV" then env = val
-                    else env[idx] = val end
-                end,
-                __pairs = function()
-                    return next, env
-                end,
-                __len = function()
-                    return #env
-                end
-            }))
+            return load(chunk, name, mode, make_ENV(env or process.env))
         end
-    else G.load = function(chunk, name, mode, env) return load(chunk, name, mode, env or process.env) end end
+        function G.getfenv(f)
+            local v
+            if f == nil then v = getfenv(2)
+            elseif tonumber(f) and tonumber(f) > 0 then v = getfenv(f+1)
+            elseif type(f) == "function" then v = getfenv(f)
+            else v = getfenv(f) end
+            local mt = getmetatable(f)
+            if mt and mt.__env then return mt.__env
+            else return v end
+        end
+        function G.setfenv(f, e)
+            return setfenv(f, make_ENV(e))
+        end
+    else G.load, G.getfenv, G.setfenv = function(chunk, name, mode, env) return load(chunk, name, mode, env or process.env) end, getfenv, setfenv end
 
     function G.loadfile(path, mode, env)
         if env == nil and type(mode) == "table" then env, mode = mode, nil end
@@ -494,7 +491,7 @@ function createLuaLib(process)
         end,
         time = function(t)
             if t == "ingame" then return oldos.epoch "ingame" / 1000
-            elseif t == "nano" then return oldos.epoch "nano" end
+            elseif t == "nano" then return ccemux and ccemux.nanoTime() or oldos.epoch "nano" end
             expect(1, t, "table", "nil")
             if t then return oldos.time(t)
             else return oldos.epoch "utc" / 1000 end
@@ -513,8 +510,6 @@ function createLuaLib(process)
     -- TODO: Restrict hook modification so programs can't arbitrarily disable preemption
 
     createRequire(process, G)
-
-    G.periphemu = periphemu -- TODO: TEMPORARY
 
     -- Protect all global functions from debug
     for k,v in pairs(G) do

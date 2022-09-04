@@ -8,6 +8,9 @@ end
 function syscalls.loadmodule(process, thread, path)
     expect(1, path, "string")
     if process.user ~= "root" then error("Could not load kernel module: Permission denied", 2) end
+    local stat = filesystem.stat(KERNEL, path)
+    if stat.type == "directory" then error("Could not load kernel module: Is a directory", 2) end
+    if stat.owner ~= "root" or stat.worldPermissions.write then error("Insecure permissions set on kernel module, refusing to load", 2) end
     local name = v:match "[^%.]+"
     syslog.log("Loading kernel module " .. name .. " from " .. path)
     local file, err = filesystem.open(KERNEL, path, "rb")
@@ -36,7 +39,7 @@ function syscalls.callmodule(process, thread, name, func, ...)
     expect(2, func, "string")
     if not modules[name] then error("Module '" .. name .. "' does not exist", 2)
     elseif type(modules[name]) ~= "table" then error("Module '" .. name .. "' does not have a callable interface", 2)
-    elseif type(modules[name][func]) ~= "function" then error("Module '" .. name .. "' does not have a method '" .. func .. "'", 2) end
+    elseif func == "unload" or type(modules[name][func]) ~= "function" then error("Module '" .. name .. "' does not have a method '" .. func .. "'", 2) end
     return modules[name][func](process, thread, ...)
 end
 
@@ -44,6 +47,11 @@ syslog.log("Loading kernel modules from /lib/modules")
 local ok, modlist = pcall(filesystem.list, KERNEL, "/lib/modules")
 if ok then
     for _, v in ipairs(modlist) do
-        syscalls.loadmodule(KERNEL, nil, filesystem.combine("/lib/modules", v))
+        local p = filesystem.combine("/lib/modules", v)
+        local stat = filesystem.stat(KERNEL, p)
+        if stat.type ~= "directory" then
+            local ok, err = pcall(syscalls.loadmodule, KERNEL, nil, p)
+            if not ok then syslog.log({level = "error"}, "Could not load module from " .. p .. ": " .. err) end
+        end
     end
 else syslog.log({level = "notice"}, "Could not open /lib/modules:", modlist) end

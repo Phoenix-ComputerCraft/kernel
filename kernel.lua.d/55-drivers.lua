@@ -779,6 +779,40 @@ local peripheralDrivers = {
     drivers.peripheral_speaker
 }
 
+--- Adds a driver to the list of drivers to listen for on the computer and attached modems.
+-- @tparam Driver driver The driver to add
+function registerDriver(driver)
+    local init = driver.init
+    driver.init = function(node)
+        checkCall(node)
+        if init then return init(node) end
+    end
+    driver.__callback = peripheralTypeCallback(driver, driver.type)
+    hardware.listen(driver.__callback, deviceTreeRoot)
+    peripheralDrivers[#peripheralDrivers+1] = driver
+    for _, node in ipairs(hardware.find("modem")) do
+        if not node.metadata.wireless then
+            hardware.listen(driver.__callback, node)
+            node.internalState.modem.callbacks[#node.internalState.modem.callbacks+1] = f
+        end
+    end
+end
+
+--- Removes a driver from the list of drivers to listen for on the computer and attached modems.
+-- @tparam Driver driver The driver to remove
+function deregisterDriver(driver)
+    if not driver.__callback then return end
+    hardware.unlisten(driver.__callback)
+    for _, v in ipairs(hardware.find(driver.type)) do hardware.deregister(v, driver) end
+    for i, v in ipairs(localPeripherals) do if v == driver then table.remove(localPeripherals, i) break end end
+    for _, node in ipairs(hardware.find("modem")) do
+        if not node.metadata.wireless then
+            hardware.unlisten(driver.__callback)
+            for i, v in ipairs(node.internalState.modem.callbacks) do if v == driver.__callback then table.remove(node.internalState.modem.callbacks, i) break end end
+        end
+    end
+end
+
 drivers.peripheral_modem = {
     name = "peripheral_modem",
     type = "modem",

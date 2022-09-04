@@ -1,3 +1,6 @@
+--- hardware
+-- @section hardware
+
 -- UUID generation code
 
 -- Borrowed from https://github.com/mpeterv/sha1
@@ -405,6 +408,37 @@ end
 
 function syscalls.uptime(process, thread)
     return (os.epoch "utc" - systemStartTime) / 1000
+end
+
+function syscalls.attach(process, thread, side, _type, ...)
+    if process.user ~= "root" then error("Permission denied") end
+    expect(1, side, "string", "number")
+    expect(2, _type, "string")
+    local ok, err
+    if periphemu then ok = periphemu.create(side, _type, ...)
+    elseif ccemux then
+        if type(side) == "number" then side = _type .. "_" .. side end
+        if _type == "drive" then _type = "disk_drive"
+        elseif _type == "modem" then _type = "wireless_modem" end
+        if _type == "computer" then
+            local id = tonumber(side:match("%d+"))
+            if id then ok, err = pcall(ccemux.openEmu, id)
+            else ok, err = false, "Invalid side" end
+        else ok, err = pcall(ccemux.attach, side, _type, ...) end
+    else ok, err = false, "Operation not supported" end
+    return ok, err
+end
+
+function syscalls.detach(process, thread, side)
+    if process.user ~= "root" then error("Permission denied") end
+    expect(1, side, "string", "number")
+    local ok, err
+    if periphemu then ok = periphemu.remove(side)
+    elseif ccemux then
+        if type(side) == "number" then side = _type .. "_" .. side end
+        ok, err = pcall(ccemux.detach, side)
+    else ok, err = false, "Operation not supported" end
+    return ok, err
 end
 
 -- TODO: temporary?

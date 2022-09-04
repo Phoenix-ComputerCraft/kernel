@@ -1,3 +1,6 @@
+--- syslog
+-- @section syslog
+
 --- Stores all open system logs.
 syslogs = {
     default = {

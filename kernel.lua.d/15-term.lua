@@ -1,3 +1,6 @@
+--- terminal
+-- @section terminal
+
 --- Returns a new TTY object.
 -- @tparam table term The CraftOS terminal object to render on
 -- @tparam number width The width of the TTY
@@ -1246,6 +1249,7 @@ function syscalls.stdout(process, thread, handle)
     expect(1, handle, "number", "table", "string", "nil")
     if process.stdout and process.stdout.isTTY and process.stdout.frontmostProcess == process then
         process.stdout.frontmostProcess = table.remove(process.stdout.processList)
+        if discord and process.stdout == currentTTY then discord("Phoenix", "Executing " .. process.stdout.frontmostProcess.name) end
     end
     if type(handle) == "number" then process.stdout = TTY[handle]
     elseif type(handle) == "string" then
@@ -1257,6 +1261,7 @@ function syscalls.stdout(process, thread, handle)
             process.stdout.frontmostProcess = table.remove(process.stdout.processList)
             handle.processList[#handle.processList+1] = handle.frontmostProcess
             handle.frontmostProcess = process
+            if discord and process.stdout == currentTTY then discord("Phoenix", "Executing " .. process.name) end
         end
         process.stdout = handle
     elseif handle == nil then process.stdout = nil
@@ -1268,6 +1273,7 @@ function syscalls.stdout(process, thread, handle)
                 process.stdout.frontmostProcess = table.remove(process.stdout.processList)
                 handle.processList[#handle.processList+1] = handle.frontmostProcess
                 handle.frontmostProcess = process
+                if discord and process.stdout == currentTTY then discord("Phoenix", "Executing " .. process.name) end
             end
         else
             expect.field(handle, "write", "function")

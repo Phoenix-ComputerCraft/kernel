@@ -5,7 +5,7 @@
 -- See the Phoenix EULA (https://github.com/Phoenix-ComputerCraft/kernel/blob/master/LICENSE.md) for more information.
 
 --- Version number of Phoenix.
-PHOENIX_VERSION = "0.0.1"
+PHOENIX_VERSION = "0.0.2"
 --- Build string of Phoenix.
 PHOENIX_BUILD = "PRERELEASE NONFREE $BUILD_DATE$"
 
@@ -14,7 +14,7 @@ systemStartTime = os.epoch "utc"
 
 --- Stores all kernel arguments passed on the command line.
 args = {
-    init = "/bin/cash.lua",
+    init = "/sbin/init.lua",
     root = "/root",
     rootfstype = "craftos",
     preemptive = true,
@@ -61,6 +61,8 @@ user = {}
 syslog = {}
 --- Hardware API
 hardware = {}
+
+if discord then discord("Phoenix", "Booting Phoenix " .. PHOENIX_VERSION) end
 
 -- ==== LOADER ====
 
