@@ -1213,7 +1213,7 @@ function syscalls.stdin(process, thread, handle)
         if not node then error("bad argument #1 (no such device)", 2) end
         if not node.internalState.tty then error("bad argument #1 (no TTY available on device)", 2) end
         handle = node.internalState.tty
-        if process.stdin.frontmostProcess ~= process then
+        if process.stdin.frontmostProcess == process then
             process.stdin.frontmostProcess = table.remove(process.stdin.processList)
             handle.processList[#handle.processList+1] = handle.frontmostProcess
             handle.frontmostProcess = process
@@ -1224,7 +1224,7 @@ function syscalls.stdin(process, thread, handle)
         if handle.isTTY then
             handle = terminal.userTTYs[handle]
             if not handle then error("bad argument #1 (invalid TTY)", 2) end
-            if process.stdin.frontmostProcess ~= process then
+            if process.stdin.frontmostProcess == process then
                 process.stdin.frontmostProcess = table.remove(process.stdin.processList)
                 handle.processList[#handle.processList+1] = handle.frontmostProcess
                 handle.frontmostProcess = process
@@ -1257,7 +1257,7 @@ function syscalls.stdout(process, thread, handle)
         if not node then error("bad argument #1 (no such device)", 2) end
         if not node.internalState.tty then error("bad argument #1 (no TTY available on device)", 2) end
         handle = node.internalState.tty
-        if process.stdout.frontmostProcess ~= process then
+        if process.stdout.frontmostProcess == process then
             process.stdout.frontmostProcess = table.remove(process.stdout.processList)
             handle.processList[#handle.processList+1] = handle.frontmostProcess
             handle.frontmostProcess = process
@@ -1269,7 +1269,7 @@ function syscalls.stdout(process, thread, handle)
         if handle.isTTY then
             handle = terminal.userTTYs[handle]
             if not handle then error("bad argument #1 (invalid TTY)", 2) end
-            if process.stdout.frontmostProcess ~= process then
+            if process.stdout.frontmostProcess == process then
                 process.stdout.frontmostProcess = table.remove(process.stdout.processList)
                 handle.processList[#handle.processList+1] = handle.frontmostProcess
                 handle.frontmostProcess = process
@@ -1300,7 +1300,7 @@ function syscalls.stderr(process, thread, handle)
         if not node then error("bad argument #1 (no such device)", 2) end
         if not node.internalState.tty then error("bad argument #1 (no TTY available on device)", 2) end
         handle = node.internalState.tty
-        if process.stderr.frontmostProcess ~= process then
+        if process.stderr.frontmostProcess == process then
             process.stderr.frontmostProcess = table.remove(process.stderr.processList)
             handle.processList[#handle.processList+1] = handle.frontmostProcess
             handle.frontmostProcess = process
@@ -1311,7 +1311,7 @@ function syscalls.stderr(process, thread, handle)
         if handle.isTTY then
             handle = terminal.userTTYs[handle]
             if not handle then error("bad argument #1 (invalid TTY)", 2) end
-            if process.stderr.frontmostProcess ~= process then
+            if process.stderr.frontmostProcess == process then
                 process.stderr.frontmostProcess = table.remove(process.stderr.processList)
                 handle.processList[#handle.processList+1] = handle.frontmostProcess
                 handle.frontmostProcess = process

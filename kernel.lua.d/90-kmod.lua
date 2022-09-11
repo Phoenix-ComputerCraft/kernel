@@ -11,7 +11,7 @@ function syscalls.loadmodule(process, thread, path)
     local stat = filesystem.stat(KERNEL, path)
     if stat.type == "directory" then error("Could not load kernel module: Is a directory", 2) end
     if stat.owner ~= "root" or stat.worldPermissions.write then error("Insecure permissions set on kernel module, refusing to load", 2) end
-    local name = v:match "[^%.]+"
+    local name = path:match "([^%./]+)[^/]*$"
     syslog.log("Loading kernel module " .. name .. " from " .. path)
     local file, err = filesystem.open(KERNEL, path, "rb")
     if file then
