@@ -61,7 +61,9 @@ function createRequire(process, G)
         G.package.libpath = oldenv.package and oldenv.package.libpath
     end
     G.package.path = G.package.path or "/lib/?.lua;/lib/?/init.lua;/usr/lib/?.lua;/usr/lib/?/init.lua;./?.lua;./?/init.lua"
+    if type(process.vars.PACKAGE_PATH) == "string" then G.package.path = process.vars.PACKAGE_PATH .. ';' .. G.package.path end
     G.package.libpath = G.package.libpath or "/lib/lib?.a;/usr/lib/lib?.a"
+    if type(process.vars.PACKAGE_LIBPATH) == "string" then G.package.libpath = process.vars.PACKAGE_LIBPATH .. ';' .. G.package.libpath end
     G.package.config = "/\n;\n?\n!\n-"
     G.package.loaded = loaded
     G.package.preload = preload

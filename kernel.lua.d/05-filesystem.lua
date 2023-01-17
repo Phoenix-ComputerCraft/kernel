@@ -50,11 +50,11 @@
     }
 ]]
 
--- TODO: Add disk space metrics
--- TODO: Add links, FIFOs, special file support
-
 --- Stores the current mounts as a key-value table of paths to filesystem objects.
 mounts = {}
+
+--- Stores all FIFOs in a table-indexed table.
+fifos = {}
 
 --- This table contains all filesystem types. Use this to insert more filesystem
 -- types into the system.
@@ -80,8 +80,163 @@ filesystems = {
         }
     },
     tmpfs = {},
-    drivefs = {}
+    drivefs = {},
+    tablefs = {},
 }
+
+local function getRealPath(process, path)
+    local p = fs.combine(process.root, path:sub(1, 1) == "/" and "" or process.dir, path)
+    if "/" .. p .. "/" ~= process.root and p:find(process.root:sub(2), 1, true) ~= 1 then error(path .. ": No such file or directory", 4) end
+    return p
+end
+
+local function getMount(process, path)
+    local fullPath = split(getRealPath(process, path), "/\\")
+    if #fullPath == 0 then return mounts[""], path, "" end
+    local maxPath
+    for k in pairs(mounts) do
+        local ok = true
+        for i,c in ipairs(split(k, "/\\")) do if fullPath[i] ~= c then ok = false break end end
+        if ok and (not maxPath or #k > #maxPath) then maxPath = k end
+    end
+    if not maxPath then panic("Could not find mount for path " .. path .. ". Where is root?") end
+    local parts = split(maxPath, "/\\")
+    local p = #fullPath >= #parts + 1 and fs.combine(table.unpack(fullPath, #parts + 1, #fullPath)) or ""
+    --syslog.debug(path, #parts, #fullPath, p)
+    return mounts[maxPath], p, maxPath
+end
+
+function filesystem.openfifo(process, obj, mode)
+    local closed = false
+    local function setenv(t)
+        for _, v in pairs(t) do setfenv(v, process.env) debug.protect(v) end
+        return setmetatable(t, {__name = "file"})
+    end
+    if mode == "r" then
+        return setenv {
+            readLine = function(newline)
+                if closed then error("attempt to use a closed file", 2) end
+                if #obj.data == 0 then return nil end
+                local d
+                d, obj.data = obj.data:match("([^\n]*" .. (newline and "\n?)" or ")\n?") .. "(.*)")
+                return d
+            end,
+            readAll = function()
+                if closed then error("attempt to use a closed file", 2) end
+                if #obj.data == 0 then return nil end
+                local d = obj.data
+                obj.data = ""
+                return d
+            end,
+            read = function(n)
+                if closed then error("attempt to use a closed file", 2) end
+                if n ~= nil and type(n) ~= "number" then error("bad argument #1 (expected number, got " .. type(n) .. ")", 2) end
+                n = n or 1
+                if #obj.data == 0 then return nil end
+                local d = obj.data:sub(1, n)
+                obj.data = obj.data:sub(n + 1)
+                return d
+            end,
+            close = function()
+                if closed then error("attempt to use a closed file", 2) end
+                closed = true
+            end
+        }
+    elseif mode == "w" or mode == "a" then
+        local buf = obj.data
+        return setenv {
+            write = function(d)
+                if closed then error("attempt to use a closed file", 2) end
+                buf = buf .. tostring(d)
+            end,
+            writeLine = function(d)
+                if closed then error("attempt to use a closed file", 2) end
+                buf = buf .. tostring(d) .. "\n"
+            end,
+            flush = function()
+                if closed then error("attempt to use a closed file", 2) end
+                obj.data = buf
+            end,
+            close = function()
+                if closed then error("attempt to use a closed file", 2) end
+                obj.data = buf
+                closed = true
+            end
+        }
+    elseif mode == "rb" then
+        return setenv {
+            readLine = function(newline)
+                if closed then error("attempt to use a closed file", 2) end
+                if #obj.data == 0 then return nil end
+                local d
+                d, obj.data = obj.data:match("([^\n]*" .. (newline and "\n?)" or ")\n?") .. "(.*)")
+                return d
+            end,
+            readAll = function()
+                if closed then error("attempt to use a closed file", 2) end
+                if #obj.data == 0 then return nil end
+                local d = obj.data
+                obj.data = ""
+                return d
+            end,
+            read = function(n)
+                if closed then error("attempt to use a closed file", 2) end
+                if n ~= nil and type(n) ~= "number" then error("bad argument #1 (expected number, got " .. type(n) .. ")", 2) end
+                if #obj.data == 0 then return nil end
+                if n then
+                    local d = obj.data:sub(1, n)
+                    obj.data = obj.data:sub(n + 1)
+                    return d
+                else
+                    local d = obj.data:byte()
+                    obj.data = obj.data:sub(2)
+                    return d
+                end
+            end,
+            seek = function(whence, offset)
+                if whence ~= nil and type(whence) ~= "string" then error("bad argument #1 (expected string, got " .. type(whence) .. ")", 2) end
+                if offset ~= nil and type(offset) ~= "number" then error("bad argument #2 (expected number, got " .. type(offset) .. ")", 2) end
+                if closed then error("attempt to use closed file", 2) end
+                return 0
+            end,
+            close = function()
+                if closed then error("attempt to use a closed file", 2) end
+                closed = true
+            end
+        }
+    elseif mode == "wb" or mode == "ab" then
+        local buf = obj.data
+        return setenv {
+            write = function(d)
+                if closed then error("attempt to use a closed file", 2) end
+                if type(d) == "number" then buf = buf .. string.char(d)
+                elseif type(d) == "string" then buf = buf .. d
+                else error("bad argument #1 (expected string or number, got " .. type(d) .. ")", 2) end
+            end,
+            writeLine = function(d)
+                if closed then error("attempt to use a closed file", 2) end
+                if type(d) == "number" then buf = buf .. string.char(d) .. "\n"
+                elseif type(d) == "string" then buf = buf .. d .. "\n"
+                else error("bad argument #1 (expected string or number, got " .. type(d) .. ")", 2) end
+            end,
+            seek = function(whence, offset)
+                if whence ~= nil and type(whence) ~= "string" then error("bad argument #1 (expected string, got " .. type(whence) .. ")", 2) end
+                if offset ~= nil and type(offset) ~= "number" then error("bad argument #2 (expected number, got " .. type(offset) .. ")", 2) end
+                if closed then error("attempt to use closed file", 2) end
+                return #obj.data + #buf
+            end,
+            flush = function()
+                if closed then error("attempt to use a closed file", 2) end
+                obj.data = buf
+            end,
+            close = function()
+                if closed then error("attempt to use a closed file", 2) end
+                obj.data = buf
+                closed = true
+            end
+        }
+    else return nil, "Invalid mode" end
+end
 
 -- craftos fs implementation
 
@@ -93,10 +248,11 @@ do
     end
 end
 
-function filesystems.craftos:getmeta(user, path)
+function filesystems.craftos:getmeta(user, path, nolink)
     local stack = {}
     local t = self.meta
-    for _,p in ipairs(split(path, "/\\")) do
+    local parts = split(path, "/\\")
+    for i, p in ipairs(parts) do
         if p == ".." then
             t = table.remove(stack)
             if not t then return nil end
@@ -107,18 +263,18 @@ function filesystems.craftos:getmeta(user, path)
             elseif not t.meta.worldPermissions.execute then error("Permission denied", 2) end
             stack[#stack+1] = t
             t = t.contents[p]
-            -- TODO: handle link traversal
-            --if t and t.meta.type == "link" then t = ? end
+            if t and t.meta.type == "link" and not (nolink and i == #parts) then syslog.debug("linking " .. path .. " to " .. filesystem.combine(t.meta.link, table.unpack(parts, i + 1))) error {link = true, path = filesystem.combine(t.meta.link, table.unpack(parts, i + 1)), orig = path} end
         end
     end
     return t and t.meta
 end
 
-function filesystems.craftos:setmeta(user, path, meta)
+function filesystems.craftos:setmeta(user, path, meta, nolink)
     local stack = {}
     local t = self.meta
     local name
-    for _,p in ipairs(split(path, "/\\")) do
+    local parts = split(path, "/\\")
+    for i, p in ipairs(parts) do
         if p == ".." then
             t = table.remove(stack)
             if not t then error("Not a directory", 2) end
@@ -129,7 +285,7 @@ function filesystems.craftos:setmeta(user, path, meta)
             if not t.contents[p] then t.contents[p] = { -- Initialize with default directory meta if not present
                 meta = {                                -- This means the directory was created on-disk but the metadata was never set
                     type = "directory",                 -- We'll set it properly at the end (or something)
-                    owner = t.meta.owner or "root",     -- TODO: maybe set this to the parent's permissions? (Would maybe make more sense)
+                    owner = t.meta.owner or "root",
                     permissions = {
                         root = {read = true, write = true, execute = true}
                     },
@@ -141,8 +297,7 @@ function filesystems.craftos:setmeta(user, path, meta)
             stack[#stack+1] = t
             t = t.contents[p]
             name = p
-            -- TODO: handle link traversal
-            --if t and t.meta.type == "link" then t = ? end
+            if t and t.meta.type == "link" and not (nolink and i == #parts) then syslog.debug("linking " .. path .. " to " .. filesystem.combine(t.meta.link, table.unpack(parts, i + 1))) error {link = true, path = filesystem.combine(t.meta.link, table.unpack(parts, i + 1)), orig = path} end
         end
     end
     if meta ~= nil then
@@ -151,7 +306,8 @@ function filesystems.craftos:setmeta(user, path, meta)
             owner = meta.owner,
             permissions = deepcopy(meta.permissions),
             worldPermissions = deepcopy(meta.worldPermissions),
-            setuser = meta.setuser
+            setuser = meta.setuser,
+            link = meta.link
         }
         if meta.type ~= "directory" then t.contents = nil end
     else stack[#stack].contents[name] = nil end
@@ -173,14 +329,20 @@ end
 
 function filesystems.craftos:open(process, path, mode)
     local ok, stat = pcall(self.stat, self, process, path)
-    if not ok then return nil, stat
+    if not ok then
+        if type(stat) == "table" then error(stat) end
+        return nil, stat
     elseif not stat then
         if mode:sub(1, 1) == "w" or mode:sub(1, 1) == "a" then
             if self.readOnly then return nil, "Read-only filesystem" end
             local pok, pstat = pcall(self.stat, self, process, fs.getDir(path))
             if not pok or not pstat then
+                if type(pstat) == "table" then error(pstat) end
                 local mok, err = pcall(self.mkdir, self, process, fs.getDir(path))
-                if not mok then return nil, err:gsub("kernel:%d: ", "") end
+                if not mok then
+                    if type(err) == "table" then error(err) end
+                    return nil, err:gsub("kernel:%d: ", "")
+                end
                 pstat = self:stat(process, fs.getDir(path))
                 if not pstat then return nil, "Could not stat " .. fs.getDir(path) end
             end
@@ -210,6 +372,15 @@ function filesystems.craftos:open(process, path, mode)
     local perms = stat.permissions[process.user] or stat.worldPermissions
     --syslog.debug(path, mode, perms.read, perms.write, perms.execute)
     if (mode:sub(1, 1) == "r" and not perms.read) or ((mode:sub(1, 1) == "w" or mode:sub(1, 1) == "a") and not perms.write) then return nil, "Permission denied" end
+    if stat.type == "fifo" then
+        local meta = self:getmeta(process.user, fs.combine(self.path, path))
+        local fifo = fifos[meta]
+        if not fifo then
+            fifo = {data = ""}
+            fifos[meta] = fifo
+        end
+        return filesystem.openfifo(process, fifo, mode)
+    end
     return setmetatable(fs.open(fs.combine(self.path, path), mode), {__name = "file"})
 end
 
@@ -224,7 +395,7 @@ function filesystems.craftos:list(process, path)
 end
 
 -- TODO: Block access when a parent directory isn't readable
-function filesystems.craftos:stat(process, path)
+function filesystems.craftos:stat(process, path, nolink)
     local p = fs.combine(self.path, path)
     if p:find(self.path:gsub("^/", ""):gsub("/$", ""), 1, false) ~= 1 then return nil end
     local ok, attr = pcall(fs.attributes, p)
@@ -244,7 +415,7 @@ function filesystems.craftos:stat(process, path)
         return attr
     end
     attr.isReadOnly = nil
-    local meta = self:getmeta(process.user, fs.combine(self.path, path))
+    local meta = self:getmeta(process.user, fs.combine(self.path, path), nolink)
     -- The path may exist on the filesystem but have no metadata.
     if meta then
         attr.owner = meta.owner
@@ -252,6 +423,7 @@ function filesystems.craftos:stat(process, path)
         attr.worldPermissions = deepcopy(meta.worldPermissions)
         attr.type = meta.type or attr.type
         attr.setuser = meta.setuser
+        attr.link = meta.link
     else
         attr.owner = "root" -- all files are root-owned by default
         attr.permissions = {
@@ -265,10 +437,10 @@ end
 
 function filesystems.craftos:remove(process, path)
     if self.readOnly then error(path .. ": Read-only filesystem", 2) end
-    local stat = self:stat(process, path)
+    local stat = self:stat(process, path, true)
     if not stat then return end
     local function checkWriteRecursive(p)
-        local s = self:stat(process, p)
+        local s = self:stat(process, p, true)
         local perms = s.permissions[process.user] or s.worldPermissions
         if process.user ~= "root" and not perms.write then error(p .. ": Permission denied", 3) end
         if s.type == "directory" then
@@ -278,13 +450,13 @@ function filesystems.craftos:remove(process, path)
     end
     checkWriteRecursive(path)
     fs.delete(fs.combine(self.path, path))
-    self:setmeta(process.user, fs.combine(self.path, path), nil)
+    self:setmeta(process.user, fs.combine(self.path, path), nil, true)
 end
 
 function filesystems.craftos:rename(process, from, to)
     if self.readOnly then error("Read-only filesystem", 2) end
-    local fromstat = self:stat(process, from)
-    local tostat = self:stat(process, to)
+    local fromstat = self:stat(process, from, true)
+    local tostat = self:stat(process, to, true)
     if not fromstat then error(from .. ": No such file or directory", 2)
     elseif tostat then error(to .. ": " .. tostat.type:gsub("%w", string.upper, 1) .. " already exists", 2) end
     tostat = self:stat(process, fs.getDir(to))
@@ -297,8 +469,8 @@ function filesystems.craftos:rename(process, from, to)
         if not perms.write then error(to .. ": Permission denied", 2) end
     end
     fs.move(fs.combine(self.path, from), fs.combine(self.path, to))
-    self:setmeta(process.user, fs.combine(self.path, to), self:getmeta(process.user, fs.combine(self.path, from)))
-    self:setmeta(process.user, fs.combine(self.path, from), nil)
+    self:setmeta(process.user, fs.combine(self.path, to), self:getmeta(process.user, fs.combine(self.path, from), true), true)
+    self:setmeta(process.user, fs.combine(self.path, from), nil, true)
 end
 
 function filesystems.craftos:mkdir(process, path)
@@ -343,9 +515,27 @@ function filesystems.craftos:mkdir(process, path)
     fs.makeDir(fs.combine(self.path, path))
 end
 
+function filesystems.craftos:link(process, path, location)
+    local stat = self:stat(process, path)
+    if stat then error(path .. ": File exists", 2) end
+    self:open(process, path, "w").close()
+    local meta = self:getmeta(process.user, fs.combine(self.path, path), true)
+    meta.type, meta.link = "link", location
+    self:setmeta(process.user, fs.combine(self.path, path), meta, true)
+end
+
+function filesystems.craftos:mkfifo(process, path)
+    local stat = self:stat(process, path)
+    if stat then error(path .. ": File exists", 2) end
+    self:open(process, path, "w").close()
+    local meta = self:getmeta(process.user, fs.combine(self.path, path), true)
+    meta.type = "fifo"
+    self:setmeta(process.user, fs.combine(self.path, path), meta, true)
+end
+
 function filesystems.craftos:chmod(process, path, user, mode)
     if self.readOnly then error(path .. ": Read-only filesystem", 2) end
-    local stat = self:stat(process, path)
+    local stat = self:stat(process, path, true)
     if not stat then error(path .. ": No such file or directory", 2) end
     if not stat.owner or (process.user ~= "root" and process.user ~= stat.owner) then error(path .. ": Permission denied", 2) end
     local perms
@@ -400,17 +590,17 @@ function filesystems.craftos:chmod(process, path, user, mode)
         if mode.execute ~= nil then perms.execute = mode.execute end
         if mode.setuser ~= nil then stat.setuser = mode.setuser end
     end
-    self:setmeta(process.user, fs.combine(self.path, path), deepcopy(stat))
+    self:setmeta(process.user, fs.combine(self.path, path), deepcopy(stat), true)
 end
 
 function filesystems.craftos:chown(process, path, owner)
     if self.readOnly then error(path .. ": Read-only filesystem", 2) end
-    local stat = self:stat(process, path)
+    local stat = self:stat(process, path, true)
     if not stat then error(path .. ": No such file or directory", 2) end
     if not stat.owner or (process.user ~= "root" and process.user ~= stat.owner) then error(path .. ": Permission denied", 2) end
     stat.owner = owner
     stat.setuser = false
-    self:setmeta(process.user, fs.combine(self.path, path), deepcopy(stat))
+    self:setmeta(process.user, fs.combine(self.path, path), deepcopy(stat), true)
 end
 
 function filesystems.craftos:info()
@@ -420,26 +610,26 @@ end
 -- tmpfs implementation
 -- tmpfs stores data in the same format as craftos meta, but with the addition of storing file data in .data
 
-function filesystems.tmpfs:getpath(user, path)
+function filesystems.tmpfs:getpath(user, path, nolink)
     local t = self
-    for _,p in ipairs(split(path, "/\\")) do
+    local parts = split(path, "/\\")
+    for i, p in ipairs(parts) do
         if not t then return nil
         elseif t.type ~= "directory" then error("Not a directory", 2)
         elseif t.permissions[user] then if not t.permissions[user].execute then error("Permission denied", 2) end
         elseif not t.worldPermissions.execute then error("Permission denied", 2) end
         t = t.contents[p]
-        -- TODO: handle link traversal
-        --if t and t.meta.type == "link" then t = ? end
+        if t and t.type == "link" and not (nolink and i == #parts) then error {link = true, path = filesystem.combine(t.link, table.unpack(parts, i + 1)), orig = path} end
     end
     return t
 end
 
-function filesystems.tmpfs:setpath(user, path, data)
+function filesystems.tmpfs:setpath(user, path, data, nolink)
     local t = self
     local e = split(path, "/\\")
     local last = e[#e]
     e[#e] = nil
-    for _,p in ipairs(e) do
+    for i, p in ipairs(e) do
         if t.type ~= "directory" then error("Not a directory", 2)
         elseif t.permissions[user] then if not t.permissions[user].execute then error("Permission denied", 2) end
         elseif not t.worldPermissions.execute then error("Permission denied", 2) end
@@ -454,14 +644,14 @@ function filesystems.tmpfs:setpath(user, path, data)
             contents = {}
         } end
         t = t.contents[p]
-        -- TODO: handle link traversal
-        --if t and t.meta.type == "link" then t = ? end
+        if t and t.type == "link" then error {link = true, path = filesystem.combine(t.link, table.unpack(e, i + 1)), orig = path} end
     end
     if t.type ~= "directory" then error("Not a directory", 2)
     elseif user ~= "root" then
         if t.permissions[user] then if not t.permissions[user].execute then error("Permission denied", 2) end
         elseif not t.worldPermissions.execute then error("Permission denied", 2) end
     end
+    if not nolink and t.contents[last] and t.contents[last].type == "link" then error {link = true, path = t.contents[last].link, orig = path} end
     t.contents[last] = data
 end
 
@@ -535,11 +725,13 @@ function filesystems.tmpfs:_open_internal(process, path, mode)
             flush = function()
                 if closed then error("attempt to use a closed file", 2) end
                 data.data, data.modified = buf, epoch "utc"
+                if self.__flush then self:__flush() end
             end,
             close = function()
                 if closed then error("attempt to use a closed file", 2) end
                 data.data, data.modified = buf, epoch "utc"
                 closed = true
+                if self.__flush then self:__flush() end
             end
         }
     elseif mode == "rb" then
@@ -622,11 +814,13 @@ function filesystems.tmpfs:_open_internal(process, path, mode)
             flush = function()
                 if closed then error("attempt to use a closed file", 2) end
                 data.data, data.modified = buf, epoch "utc"
+                if self.__flush then self:__flush() end
             end,
             close = function()
                 if closed then error("attempt to use a closed file", 2) end
                 data.data, data.modified = buf, epoch "utc"
                 closed = true
+                if self.__flush then self:__flush() end
             end
         }
     else return nil, "Invalid mode" end
@@ -634,13 +828,19 @@ end
 
 function filesystems.tmpfs:open(process, path, mode)
     local ok, stat = pcall(self.stat, self, process, path)
-    if not ok then return nil, stat
+    if not ok then
+        if type(stat) == "table" then error(stat) end
+        return nil, stat
     elseif not stat then
         if mode:sub(1, 1) == "w" or mode:sub(1, 1) == "a" then
             local pok, pstat = pcall(self.stat, self, process, fs.getDir(path))
-            if not pok then
+            if not pok or not pstat then
+                if type(pstat) == "table" then error(pstat) end
                 local mok, err = pcall(self.mkdir, self, process, fs.getDir(path))
-                if not mok then return nil, err:gsub("kernel:%d: ", "") end
+                if not mok then
+                    if type(err) == "table" then error(err) end
+                    return nil, err:gsub("kernel:%d: ", "")
+                end
                 pstat = self:stat(process, fs.getDir(path))
             end
             if process.user ~= "root" then
@@ -670,6 +870,15 @@ function filesystems.tmpfs:open(process, path, mode)
         --syslog.debug(path, mode, perms.read, perms.write, perms.execute)
         if (mode:sub(1, 1) == "r" and not perms.read) or ((mode:sub(1, 1) == "w" or mode:sub(1, 1) == "a") and not perms.write) then return nil, "Permission denied" end
     end
+    if stat.type == "fifo" then
+        local meta = self:getpath(process.user, path)
+        local fifo = fifos[meta]
+        if not fifo then
+            fifo = {data = ""}
+            fifos[meta] = fifo
+        end
+        return filesystem.openfifo(process, fifo, mode)
+    end
     return self:_open_internal(process, path, mode)
 end
 
@@ -686,8 +895,8 @@ function filesystems.tmpfs:list(process, path)
     return retval
 end
 
-function filesystems.tmpfs:stat(process, path)
-    local data = self:getpath(process.user, path)
+function filesystems.tmpfs:stat(process, path, nolink)
+    local data = self:getpath(process.user, path, nolink)
     if not data then return nil end
     return {
         size = data.type == "file" and #data.data or (data.type == "directory" and #data.contents or 0),
@@ -700,6 +909,7 @@ function filesystems.tmpfs:stat(process, path)
         setuser = data.setuser,
         capacity = math.huge,
         freeSpace = math.huge,
+        link = data.link,
         special = {}
     }
 end
@@ -767,8 +977,57 @@ function filesystems.tmpfs:mkdir(process, path)
     end
 end
 
+function filesystems.tmpfs:link(process, path, location)
+    local stat = self:stat(process, path)
+    if stat then error(path .. ": File exists", 2) end
+    local pok, pstat = pcall(self.stat, self, process, fs.getDir(path))
+    if not pok or not pstat then
+        if type(pstat) == "table" then error(pstat) end
+        local mok, err = pcall(self.mkdir, self, process, fs.getDir(path))
+        if not mok then
+            if type(err) == "table" then error(err) end
+            return nil, type(err) == "string" and err:gsub("kernel:%d: ", "") or err
+        end
+        pstat = self:stat(process, fs.getDir(path))
+    end
+    self:setpath(process.user, path, {
+        type = "link",
+        owner = process.user,
+        permissions = deepcopy(pstat.permissions),
+        worldPermissions = deepcopy(pstat.worldPermissions),
+        setuser = false,
+        created = os.epoch "utc",
+        modified = os.epoch "utc",
+        path = location
+    }, true)
+end
+
+function filesystems.tmpfs:mkfifo(process, path)
+    local stat = self:stat(process, path)
+    if stat then error(path .. ": File exists", 2) end
+    local pok, pstat = pcall(self.stat, self, process, fs.getDir(path))
+    if not pok or not pstat then
+        if type(pstat) == "table" then error(pstat) end
+        local mok, err = pcall(self.mkdir, self, process, fs.getDir(path))
+        if not mok then
+            if type(err) == "table" then error(err) end
+            return nil, type(err) == "string" and err:gsub("kernel:%d: ", "") or err
+        end
+        pstat = self:stat(process, fs.getDir(path))
+    end
+    self:setpath(process.user, path, {
+        type = "fifo",
+        owner = process.user,
+        permissions = deepcopy(pstat.permissions),
+        worldPermissions = deepcopy(pstat.worldPermissions),
+        setuser = false,
+        created = os.epoch "utc",
+        modified = os.epoch "utc"
+    }, true)
+end
+
 function filesystems.tmpfs:chmod(process, path, user, mode)
-    local stat = self:getpath(process.user, path)
+    local stat = self:getpath(process.user, path, true)
     if not stat then error(path .. ": No such file or directory", 2) end
     if not stat.owner or (process.user ~= "root" and process.user ~= stat.owner) then error(path .. ": Permission denied", 2) end
     local perms
@@ -823,16 +1082,14 @@ function filesystems.tmpfs:chmod(process, path, user, mode)
         if mode.execute ~= nil then perms.execute = mode.execute end
         if mode.setuser ~= nil then stat.setuser = mode.setuser end
     end
-    --self:setpath(process.user, fs.combine(self.path, path), deepcopy(stat)) -- may not be needed?
 end
 
 function filesystems.tmpfs:chown(process, path, owner)
-    local stat = self:getpath(process.user, path)
+    local stat = self:getpath(process.user, path, true)
     if not stat then error(path .. ": No such file or directory", 2) end
     if not stat.owner or (process.user ~= "root" and process.user ~= stat.owner) then error(path .. ": Permission denied", 2) end
     stat.owner = owner
     stat.setuser = false
-    --self:setpath(process.user, fs.combine(self.path, path), deepcopy(stat))
 end
 
 function filesystems.tmpfs:info()
@@ -856,23 +1113,56 @@ function filesystems.drivefs:info()
     return "drivefs", self.drive, {ro = self.readOnly}
 end
 
--- Syscalls
+-- tablefs implementation
+-- tablefs just inherits from tmpfs, but automatically loads the structure from a file (and can optionally be saved).
 
-local function getMount(process, path)
-    local fullPath = split(fs.combine(path:sub(1, 1) == "/" and "" or process.dir, path), "/\\")
-    if #fullPath == 0 then return mounts[""], path, "" end
-    local maxPath
-    for k in pairs(mounts) do
-        local ok = true
-        for i,c in ipairs(split(k, "/\\")) do if fullPath[i] ~= c then ok = false break end end
-        if ok and (not maxPath or #k > #maxPath) then maxPath = k end
+setmetatable(filesystems.tablefs, {__index = filesystems.tmpfs})
+
+function filesystems.tablefs:new(process, src, options)
+    local t
+    local file, err = filesystem.open(process, src, "r")
+    if file then
+        local data = file.readAll()
+        file.close()
+        local ok, res = pcall(unserialize, data)
+        if not ok then error("Could not mount " .. src .. ": " .. res, 3)
+        elseif type(res) ~= "table" or res.type ~= "directory" or type(res.contents) ~= "table" then error("Could not mount " .. src .. ": Invalid table file", 3) end
+        t = res
+    else
+        if not (options.rw and not options.ro) then error("Could not mount " .. src .. ": " .. err, 3) end
+        t = {
+            type = "directory",
+            owner = process.user,
+            permissions = {
+                [process.user] = {read = true, write = true, execute = true}
+            },
+            worldPermissions = {read = true, write = false, execute = true},
+            setuser = false,
+            created = os.epoch "utc",
+            modified = os.epoch "utc",
+            contents = {}
+        }
     end
-    if not maxPath then panic("Could not find mount for path " .. path .. ". Where is root?") end
-    local parts = split(maxPath, "/\\")
-    local p = #fullPath >= #parts + 1 and fs.combine(table.unpack(fullPath, #parts + 1, #fullPath)) or ""
-    --syslog.debug(path, #parts, #fullPath, p)
-    return mounts[maxPath], p, maxPath
+    t.src = src
+    if options.rw and not options.ro then function t:__flush()
+        local f, s = self.__flush, self.src
+        self.__flush, self.src = nil
+        local ok, res = pcall(serialize, self)
+        self.__flush, self.src = f, s
+        if not ok then error(res) end
+        local file, err = filesystem.open(process, src, "w")
+        if not file then syslog.log({level = 4}, "Could not save mount to " .. src .. ": " .. err) return end
+        file.write(res)
+        file.close()
+    end end
+    return setmetatable(t, {__index = self})
 end
+
+function filesystems.tablefs:info()
+    return "tablefs", self.src, {rw = self.__flush ~= nil, ro = self.__flush == nil}
+end
+
+-- Syscalls
 
 --- Opens a file for reading or writing.
 -- @tparam Process process The process to operate as
@@ -887,8 +1177,14 @@ function filesystem.open(process, path, mode)
     expect(1, path, "string")
     expect(2, mode, "string")
     if not mode:match "^[rwa]b?$" then error("Invalid mode", 0) end
-    local mount, p = getMount(process, path)
-    return mount:open(process, p, mode)
+    repeat
+        local ok, mount, p = pcall(getMount, process, path)
+        if not ok then return nil, mount end
+        local res = table.pack(pcall(mount.open, mount, process, p, mode))
+        if res[1] then return table.unpack(res, 2, res.n)
+        elseif type(res[2]) ~= "table" or type(res[2].path) ~= "string" then error(res[2], 2) end
+        path = res[2].path
+    until res[1]
 end
 
 --- Returns a list of file names in the directory.
@@ -899,8 +1195,13 @@ end
 function filesystem.list(process, path)
     expect(0, process, "table")
     expect(1, path, "string")
-    local mount, p = getMount(process, path)
-    return mount:list(process, p)
+    repeat
+        local mount, p = getMount(process, path)
+        local ok, res = pcall(mount.list, mount, process, p)
+        if ok then return res
+        elseif type(res) ~= "table" or type(res.path) ~= "string" then error(res, 2) end
+        path = res.path
+    until ok
 end
 
 --- Returns a table with information about the selected path.
@@ -911,13 +1212,19 @@ end
 -- the `stat` syscall for more info)
 -- @treturn[2] nil If an error occurred
 -- @treturn[2] string An error message describing why the file couldn't be opened
-function filesystem.stat(process, path)
+function filesystem.stat(process, path, nolink)
     expect(0, process, "table")
     expect(1, path, "string")
-    local mount, p, mp = getMount(process, path)
-    local res, err = mount:stat(process, p)
-    if res then res.mountpoint = "/" .. mp end
-    return res, err
+    repeat
+        local ok, mount, p, mp = pcall(getMount, process, path)
+        if not ok then return nil, mount end
+        local ok2, res, err = pcall(mount.stat, mount, process, p, nolink)
+        if ok then
+            if res then res.mountpoint = "/" .. mp end
+            return res, err
+        elseif type(res) ~= "table" or type(res.path) ~= "string" then error(res, 2) end
+        path = res.path
+    until ok2
 end
 
 --- Removes a file or directory.
@@ -927,8 +1234,13 @@ end
 function filesystem.remove(process, path)
     expect(0, process, "table")
     expect(1, path, "string")
-    local mount, p = getMount(process, path)
-    return mount:remove(process, p)
+    repeat
+        local mount, p = getMount(process, path)
+        local ok, res = pcall(mount.remove, mount, process, p)
+        if ok then return
+        elseif type(res) ~= "table" or type(res.path) ~= "string" then error(res, 2) end
+        path = res.path
+    until ok
 end
 
 --- Renames (moves) a file or directory.
@@ -941,10 +1253,16 @@ function filesystem.rename(process, from, to)
     expect(0, process, "table")
     expect(1, from, "string")
     expect(2, to, "string")
-    local mountA, pA = getMount(process, from)
-    local mountB, pB = getMount(process, to)
-    if mountA ~= mountB then error("Attempt to rename file across two filesystems", 0) end
-    return mountA:rename(process, pA, pB)
+    repeat
+        local mountA, pA = getMount(process, from)
+        local mountB, pB = getMount(process, to)
+        if mountA ~= mountB then error("Attempt to rename file across two filesystems", 0) end
+        local ok, res = pcall(mountA.rename, mountA, process, pA, pB)
+        if ok then return
+        elseif type(res) ~= "table" or type(res.path) ~= "string" then error(res, 2) end
+        if res.orig == from then from = res.path
+        else to = res.path end
+    until ok
 end
 
 --- Creates a new directory and any parent directories.
@@ -954,8 +1272,45 @@ end
 function filesystem.mkdir(process, path)
     expect(0, process, "table")
     expect(1, path, "string")
-    local mount, p = getMount(process, path)
-    return mount:mkdir(process, p)
+    repeat
+        local mount, p = getMount(process, path)
+        local ok, res = pcall(mount.mkdir, mount, process, p)
+        if ok then return
+        elseif type(res) ~= "table" or type(res.path) ~= "string" then error(res, 2) end
+        path = res.path
+    until ok
+end
+
+--- Creates a new (symbolic) link.
+-- @tparam Process process The process to operate as
+-- @tparam string path The path of the new link
+-- @tparam string location The original path to link to
+function filesystem.link(process, path, location)
+    expect(0, process, "table")
+    expect(1, path, "string")
+    expect(2, location, "string")
+    repeat
+        local mount, p = getMount(process, path)
+        local ok, res = pcall(mount.link, mount, process, p, location)
+        if ok then return
+        elseif type(res) ~= "table" or type(res.path) ~= "string" then error(res, 2) end
+        path = res.path
+    until ok
+end
+
+--- Creates a new FIFO.
+-- @tparam Process process The process to operate as
+-- @tparam string path The path of the new FIFO
+function filesystem.mkfifo(process, path)
+    expect(0, process, "table")
+    expect(1, path, "string")
+    repeat
+        local mount, p = getMount(process, path)
+        local ok, res = pcall(mount.mkfifo, mount, process, p)
+        if ok then return
+        elseif type(res) ~= "table" or type(res.path) ~= "string" then error(res, 2) end
+        path = res.path
+    until ok
 end
 
 --- Changes the permissions (mode) of a file or directory for the specified user.
@@ -977,8 +1332,13 @@ function filesystem.chmod(process, path, user, mode)
         expect.field(mode, "write", "boolean", "nil")
         expect.field(mode, "execute", "boolean", "nil")
     end
-    local mount, p = getMount(process, path)
-    return mount:chmod(process, p, user, mode)
+    repeat
+        local mount, p = getMount(process, path)
+        local ok, res = pcall(mount.chmod, mount, process, p, user, mode)
+        if ok then return
+        elseif type(res) ~= "table" or type(res.path) ~= "string" then error(res, 2) end
+        path = res.path
+    until ok
 end
 
 --- Changes the owner of a file or directory.
@@ -990,8 +1350,29 @@ function filesystem.chown(process, path, user)
     expect(0, process, "table")
     expect(1, path, "string")
     expect(2, user, "string")
-    local mount, p = getMount(process, path)
-    return mount:chown(process, p, user)
+    repeat
+        local mount, p = getMount(process, path)
+        local ok, res = pcall(mount.chown, mount, process, p, user)
+        if ok then return
+        elseif type(res) ~= "table" or type(res.path) ~= "string" then error(res, 2) end
+        path = res.path
+    until ok
+end
+
+--- Changes the root directory for the current (and future child) processes.
+-- @tparam Process process The process to operate as
+-- @tparam string path The path to the new root directory. This is always relative
+-- to the current root.
+function filesystem.chroot(process, path)
+    expect(0, process, "table")
+    expect(1, path, "string")
+    if process.user ~= "root" then error("Could not change root: Permission denied", 2) end
+    local newroot = filesystem.combine(process.root, path) .. "/"
+    if newroot:find(process.root, 1, true) ~= 1 then error("Could not change root: No such file or directory", 2) end
+    local s = filesystem.stat("/" .. path)
+    if not s then error(path .. ": No such directory", 2) end
+    if s.type ~= "directory" then error(path .. ": Not a directory", 2) end
+    process.root = newroot
 end
 
 --- Mounts a disk device to a path using the specified filesystem and options.
@@ -1007,12 +1388,13 @@ function filesystem.mount(process, type, src, dest, options)
     expect(3, dest, "string")
     expect(4, options, "table", "nil")
     if not filesystems[type] then error("No such filesystem '" .. type .. "'", 2) end
+    local p = getRealPath(process, dest)
     local stat = filesystem.stat(process, dest)
     if not stat then error("Could not mount to " .. dest .. ": No such directory", 2)
     elseif stat.type ~= "directory" then error("Could not mount to " .. dest .. ": Not a directory", 2)
     elseif process.user ~= "root" and not (stat.permissions[process.user] or stat.worldPermissions).write then error("Could not mount to " .. dest .. ": Permission denied", 2) end
     local mount = filesystems[type]:new(process, src, options or {})
-    mounts[fs.combine(dest)] = mount
+    mounts[p] = mount
 end
 
 --- Unmounts a filesystem at a mountpoint.
@@ -1022,19 +1404,22 @@ end
 function filesystem.unmount(process, path)
     expect(0, process, "table")
     expect(1, path, "string")
-    if not mounts[fs.combine(path)] then error(path .. ": No such mount", 2) end
-    local stat = mounts[fs.combine(path)]:stat(process, "")
+    path = getRealPath(process, path)
+    if not mounts[path] then error(path .. ": No such mount", 2) end
+    local stat = mounts[path]:stat(process, "")
     if not stat then error("Internal error in unmount: could not get stat for root! Please report this to the maintainer of the target filesystem.", 2)
     elseif process.user ~= "root" and not (stat.permissions[process.user] or stat.worldPermissions).write then error(path .. ": Permission denied", 2) end
-    mounts[fs.combine(path)] = nil
+    mounts[path] = nil
 end
 
 function filesystem.mountlist(process)
     expect(0, process, "table")
     local retval = {}
     for k, v in pairs(mounts) do
-        local type, path, options = v:info()
-        retval[#retval+1] = {path = k, type = type, source = path, options = options}
+        if "/" .. k .. "/" == process.root or k:find(process.root:sub(2), 1, true) == 1 then
+            local type, path, options = v:info()
+            retval[#retval+1] = {path = k, type = type, source = path, options = options}
+        end
     end
     return retval
 end
@@ -1055,8 +1440,11 @@ function syscalls.stat(process, thread, ...) return filesystem.stat(process, ...
 function syscalls.remove(process, thread, ...) return filesystem.remove(process, ...) end
 function syscalls.rename(process, thread, ...) return filesystem.rename(process, ...) end
 function syscalls.mkdir(process, thread, ...) return filesystem.mkdir(process, ...) end
+function syscalls.link(process, thread, ...) return filesystem.link(process, ...) end
+function syscalls.mkfifo(process, thread, ...) return filesystem.mkfifo(process, ...) end
 function syscalls.chmod(process, thread, ...) return filesystem.chmod(process, ...) end
 function syscalls.chown(process, thread, ...) return filesystem.chown(process, ...) end
+function syscalls.chroot(process, thread, ...) return filesystem.chroot(process, ...) end
 function syscalls.mount(process, thread, ...) return filesystem.mount(process, ...) end
 function syscalls.unmount(process, thread, ...) return filesystem.unmount(process, ...) end
 function syscalls.mountlist(process, thread, ...) return filesystem.mountlist(process, ...) end

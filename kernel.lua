@@ -1,11 +1,11 @@
--- Phoenix Kernel v0.0.1
+-- Phoenix Kernel v0.0.3
 --
--- Copyright (c) 2021-2022 JackMacWindows. All rights reserved.
+-- Copyright (c) 2021-2023 JackMacWindows. All rights reserved.
 -- This is a PRE-RELEASE BUILD! Redistribution of this file is not permitted.
 -- See the Phoenix EULA (https://github.com/Phoenix-ComputerCraft/kernel/blob/master/LICENSE.md) for more information.
 
 --- Version number of Phoenix.
-PHOENIX_VERSION = "0.0.2"
+PHOENIX_VERSION = "0.0.3"
 --- Build string of Phoenix.
 PHOENIX_BUILD = "PRERELEASE NONFREE $BUILD_DATE$"
 
@@ -34,6 +34,8 @@ processes = {
         id = 0,
         user = "root",
         dir = "/",
+        root = "/",
+        vars = {},
         dependents = {}
     }
 }
@@ -45,6 +47,8 @@ modules = {}
 -- event name as a key, and a list of functions to call as the value. The
 -- functions are called with a single table parameter with the event parameters.
 eventHooks = {}
+-- Stores a list of functions to call before clean shutdown.
+shutdownHooks = {}
 
 -- Unique keys for certain internal uses.
 kSyscallYield = {}

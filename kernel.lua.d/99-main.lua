@@ -168,3 +168,4 @@ while processes[init_pid] do
 end
 end, debug.traceback)
 if not ok then syslog.log({level = "critical", traceback = true}, err) end
+if postkill then postkill() end

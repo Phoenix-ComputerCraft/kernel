@@ -295,6 +295,7 @@ function panic(message)
 end
 
 syslogs.default.file = filesystem.open(KERNEL, "/var/log/default.log", "a")
+shutdownHooks[#shutdownHooks+1] = function() syslogs.default.file:close() end
 
 syslog.log("Starting Phoenix version", PHOENIX_VERSION, PHOENIX_BUILD)
 syslog.log("Initialized system logger")

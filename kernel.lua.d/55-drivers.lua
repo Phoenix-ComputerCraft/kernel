@@ -166,19 +166,27 @@ function drivers.root.methods:turnOn(process) end -- do nothing
 function drivers.root.methods:shutdown(process)
     if process.user ~= "root" then error("Permission denied", 2) end
     syslog.log("System is shutting down.")
+    function postkill()
+        hardware.deregister(deviceTreeRoot, drivers.root)
+        syslog.log("Halting system")
+        for _, v in ipairs(shutdownHooks) do v() end
+        os.shutdown()
+        while true do coroutine.yield() end
+    end
     killall()
-    hardware.deregister(deviceTreeRoot, drivers.root)
-    os.shutdown()
-    while true do coroutine.yield() end
 end
 
 function drivers.root.methods:reboot(process)
     if process.user ~= "root" then error("Permission denied", 2) end
     syslog.log("System is restarting.")
+    function postkill()
+        hardware.deregister(deviceTreeRoot, drivers.root)
+        syslog.log("Rebooting system")
+        for _, v in ipairs(shutdownHooks) do v() end
+        os.reboot()
+        while true do coroutine.yield() end
+    end
     killall()
-    hardware.deregister(deviceTreeRoot, drivers.root)
-    os.reboot()
-    while true do coroutine.yield() end
 end
 
 function drivers.root:init()

@@ -279,6 +279,7 @@ function terminal.resize(tty, width, height)
     elseif height < tty.size.height then
         for y = height + 1, tty.size.height do
             tty[y] = nil
+            tty.dirtyLines[y] = nil
         end
         if tty.isLocked then
             if tty.isGraphics then
@@ -288,6 +289,7 @@ function terminal.resize(tty, width, height)
             else
                 for y = height + 1, tty.size.height do
                     tty.textBuffer[y] = nil
+                    tty.textBuffer.dirtyLines[y] = nil
                 end
             end
         end
@@ -661,9 +663,10 @@ function syscalls.write(process, thread, ...)
         if process.stdout.isTTY then terminal.write(process.stdout, t)
         else process.stdout.write(t) end
     end
-    for i, v in ipairs{...} do
+    local args = table.pack(...)
+    for i = 1, args.n do
         if i > 1 then write("\t") end
-        write(tostring(v))
+        write(tostring(args[i]))
     end
     if process.stdout.isTTY then terminal.redraw(process.stdout) end
 end
@@ -678,9 +681,10 @@ function syscalls.writeerr(process, thread, ...)
         if process.stderr.isTTY then terminal.write(process.stderr, t)
         else process.stderr.write(t) end
     end
-    for i, v in ipairs{...} do
+    local args = table.pack(...)
+    for i = 1, args.n do
         if i > 1 then write("\t") end
-        write(tostring(v))
+        write(tostring(args[i]))
     end
     if process.stderr.isTTY then terminal.redraw(process.stderr) end
 end

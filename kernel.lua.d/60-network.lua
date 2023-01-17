@@ -832,7 +832,7 @@ eventHooks.websocket_message[#eventHooks.websocket_message+1] = function(ev)
         info.buffer = info.buffer .. ev[3]
         info.process.eventQueue[#info.process.eventQueue+1] = {"handle_data_ready", {id = info.id}}
         return true
-    else syslog.log({level = "notice"}, "Received WebSocket response for " .. ev[2] .. " but nobody requested it; ignoring.") end
+    else syslog.log({level = "notice"}, "Received WebSocket message for " .. ev[2] .. " but nobody requested it; ignoring.") end
 end
 
 eventHooks.websocket_closed = eventHooks.websocket_closed or {}
@@ -932,7 +932,7 @@ local function httpHandler(process, options)
             for _, v in ipairs{...} do data = data .. tostring(v) end
         end
         local url = options.url .. "#" .. info.id
-        local ok, err = request{url = url, body = data, headers = options.headers, binary = options.encoding == "binary", method = options.method, redirect = options.redirect}
+        local ok, err = request{url = url, body = data, headers = options.headers, binary = options.encoding == "binary" or options.encoding == nil, method = options.method, redirect = options.redirect}
         if ok then
             httpRequests[url] = info
             info.status = "connecting"
@@ -954,6 +954,7 @@ local function httpHandler(process, options)
     return obj
 end
 
+-- TODO: decide whether messages should be split, binary, etc.
 local function wsHandler(process, options)
     expect.field(options, "encoding", "string", "nil")
     expect.field(options, "headers", "table", "nil")

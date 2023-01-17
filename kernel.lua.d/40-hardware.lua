@@ -440,8 +440,3 @@ function syscalls.detach(process, thread, side)
     else ok, err = false, "Operation not supported" end
     return ok, err
 end
-
--- TODO: temporary?
-function syscalls.serialize(process, thread, value)
-    return serialize(value)
-end

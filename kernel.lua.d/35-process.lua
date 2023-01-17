@@ -50,7 +50,7 @@ function reap_process(process)
         if process.stdin.frontmostProcess == process then
             process.stdin.frontmostProcess = table.remove(process.stdin.processList)
             process.stdin.preBuffer = ""
-            if discord and process.stdout == currentTTY then discord("Phoenix", "Executing " .. process.stdout.frontmostProcess.name) end
+            if discord and process.stdout == currentTTY and process.stdout.frontmostProcess then discord("Phoenix", "Executing " .. process.stdout.frontmostProcess.name) end
         else for i, v in ipairs(process.stdin.processList) do
             if v == process then table.remove(process.stdin.processList, i) break end
         end end
@@ -84,7 +84,7 @@ function syscalls.clock(process, thread)
 end
 
 function syscalls.getenv(process, thread)
-    return process.env
+    return process.vars
 end
 
 function syscalls.getname(process, thread)
@@ -126,9 +126,11 @@ function syscalls.fork(process, thread, func, name, ...)
         dependents = {},
         parent = process.id,
         dir = process.dir,
+        root = process.root,
         stdin = process.stdin,
         stdout = process.stdout,
         stderr = process.stderr,
+        vars = deepcopy(process.vars),
         cputime = 0,
         systime = 0,
         syscallyield = nil,
@@ -207,11 +209,10 @@ function syscalls.exec(process, thread, path, ...)
         local command = contents:sub(3, contents:find("\n") - 1)
         local args, i = {}, 0
         for s in command:gmatch "%S+" do args[i] = s i=i+1 end
+        args[i], i = path, i + 1
         for _,v in ipairs{...} do args[i] = v i=i+1 end
         if args[0] == path then error("Recursive path detected while resolving shebang", 0) end
-        syscalls.exec(process, thread, args[0], table.unpack(args, 1, i - 1))
-        local f = filesystem.open(process, path, "rb")
-        process.stdin = {read = function(n) if n then return f.read(n) else return f.readLine() end end}
+        syscalls.exec(process, thread, args[0], table.unpack(args, 1, i))
         process.name = "/" .. fs.combine(path:sub(1, 1) == "/" and "" or process.dir, path)
     else
         local func, err = load(contents, "@" .. path, "bt", process.env)

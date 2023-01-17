@@ -945,6 +945,19 @@ for _,v in ipairs({...}) do
     end
 end
 
+local function minver(version)
+    local res
+    if _CC_VERSION then res = version <= _CC_VERSION
+    elseif not _HOST then res = version <= os.version():gsub("CraftOS ", "")
+    elseif _HOST:match("ComputerCraft 1%.1%d+") ~= version:match("1%.1%d+") then
+      version = version:gsub("(1%.)([02-9])", "%10%2")
+      local host = _HOST:gsub("(ComputerCraft 1%.)([02-9])", "%10%2")
+      res = version <= host:match("ComputerCraft ([0-9%.]+)")
+    else res = version <= _HOST:match("ComputerCraft ([0-9%.]+)") end
+    return res
+end
+
+if not minver "1.87.0" then panic("Phoenix requires ComputerCraft 1.87.0 or later. Please upgrade your version of ComputerCraft.") end
 if jit and args.preemptive then panic("Phoenix does not support preemption when running under LuaJIT. Please set preemptive to false in the kernel arguments.") end
 if not debug and args.preemptive then panic("Phoenix does not support preemption without the debug API. Please set preemptive to false in the kernel arguments.") end
 if args.preemptive then PHOENIX_BUILD = PHOENIX_BUILD .. " PREEMPT" end
