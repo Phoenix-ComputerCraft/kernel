@@ -62,7 +62,7 @@ local function peripheralTypeCallback(driver, type)
     return function(node)
         local types, fn
         if node.parent == deviceTreeRoot then types, fn = {peripheral.getType(node.id)}, peripheral.call
-        else types, fn = {peripheral.call(node.parent.id, "getTypeRemote", node.id)}, function(...) return peripheral.call(node.parent.id, "callRemote", node.id, ...) end end
+        else types, fn = {peripheral.call(node.parent.id, "getTypeRemote", node.id)}, function(...) return peripheral.call(node.parent.id, "callRemote", ...) end end
         for _, v in ipairs(types) do if v == type then node.internalState.peripheral = {call = fn} return hardware.register(node, driver) end end
     end
 end
@@ -270,7 +270,13 @@ local function zeronil(n) if n == 0 then return nil else return n end end
 
 function drivers.root_redstone.methods:getInput() return zeronil(redstone.getAnalogInput(self.internalState.redstone.side)) end
 function drivers.root_redstone.methods:getOutput() return zeronil(redstone.getAnalogOutput(self.internalState.redstone.side)) end
-function drivers.root_redstone.methods:setOutput(process, n) n = expect(1, n, "number", "nil") or 0 expect.range(n, 0, 15) redstone.setAnalogOutput(self.internalState.redstone.side, n) end
+function drivers.root_redstone.methods:setOutput(process, n)
+    n = expect(1, n, "number", "boolean", "nil") or 0
+    if n == false then n = 0
+    elseif n == true then n = 15 end
+    expect.range(n, 0, 15)
+    redstone.setAnalogOutput(self.internalState.redstone.side, n)
+end
 function drivers.root_redstone.methods:getBundledInput() return redstone.getBundledInput(self.internalState.redstone.side) end
 function drivers.root_redstone.methods:getBundledOutput() return redstone.getBundledOutput(self.internalState.redstone.side) end
 function drivers.root_redstone.methods:setBundledOutput(process, n) expect(1, n, "number") expect.range(n, 0, 65535) redstone.setBundledOutput(self.internalState.redstone.side, n) end
@@ -340,7 +346,8 @@ drivers.peripheral_drive = {
     name = "peripheral_drive",
     type = "drive",
     properties = {
-        "state"
+        "state",
+        "label"
     },
     methods = {}
 }
@@ -354,7 +361,9 @@ function drivers.peripheral_drive.methods:getState(process)
     }
 end
 
+drivers.peripheral_drive.methods.getLabel = noArgMethod "getDiskLabel"
 drivers.peripheral_drive.methods.setLabel = oneArgMethod "setDiskLabel" ("string", "nil")
+drivers.peripheral_drive.methods.getMountPath = noArgMethod "getMountPath"
 
 function drivers.peripheral_drive.methods:play(process)
     if not self.internalState.peripheral.call(self.id, "hasAudio") then error("Inserted disk is not an audio disc", 2) end
@@ -367,10 +376,10 @@ drivers.peripheral_drive.methods.insert = oneArgRootMethod "insertDisk" ("string
 
 function drivers.peripheral_drive:init()
     checkCall(self)
-    self.displayName = (peripheral.call(self.id, "getDiskLabel") or "No disk") .. " on drive " .. self.id
+    self.displayName = (self.internalState.peripheral.call(self.id, "getDiskLabel") or "No disk") .. " on drive " .. self.id
 end
 
-register "device"
+register "drive"
 
 eventHooks.disk = eventHooks.disk or {}
 eventHooks.disk[#eventHooks.disk+1] = function(ev)
@@ -889,6 +898,7 @@ function drivers.peripheral_modem:init()
         local f = peripheralTypeCallback(drivers["peripheral_computer"], "turtle")
         hardware.listen(f, self)
         self.internalState.modem.callbacks[#self.internalState.modem.callbacks+1] = f
+        for _, name in ipairs(self.internalState.peripheral.call(self.id, "getNamesRemote")) do hardware.add(self, name) end
     end
 end
 

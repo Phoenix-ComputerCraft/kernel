@@ -66,7 +66,7 @@ local deviceListeners = {}
 function hardware.get(path)
     expect(1, path, "string")
     if path:find("^%x+%-%x+%-%x+%-%x+%-%x+$") then return deviceUUIDs[path]
-    elseif path:find("/") then
+    elseif path == "" or path:find("/") then
         -- Absolute path
         local node = deviceTreeRoot
         for name in path:gmatch "[^/]+" do
@@ -439,4 +439,8 @@ function syscalls.detach(process, thread, side)
         ok, err = pcall(ccemux.detach, side)
     else ok, err = false, "Operation not supported" end
     return ok, err
+end
+
+function syscalls.kernargs(process, thread)
+    return deepcopy(args)
 end

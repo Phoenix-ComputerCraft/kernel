@@ -2,11 +2,12 @@
 -- @section terminal
 
 --- Returns a new TTY object.
--- @tparam table term The CraftOS terminal object to render on
--- @tparam number width The width of the TTY
--- @tparam number height The height of the TTY
--- @treturn TTY The new TTY object
+---@param term table The CraftOS terminal object to render on
+---@param width number The width of the TTY
+---@param height number The height of the TTY
+---@return TTY tty The new TTY object
 function terminal.makeTTY(term, width, height)
+    ---@class TTY
     local retval = {
         isTTY = true,
         flags = {
@@ -75,6 +76,7 @@ keysHeld = {ctrl = false, alt = false, shift = false}
 
 eventHooks.term_resize = eventHooks.term_resize or {}
 eventHooks.char = eventHooks.char or {}
+eventHooks.paste = eventHooks.paste or {}
 eventHooks.key = eventHooks.key or {}
 eventHooks.key_up = eventHooks.key_up or {}
 eventHooks.term_resize[#eventHooks.term_resize+1] = function()
@@ -82,6 +84,13 @@ eventHooks.term_resize[#eventHooks.term_resize+1] = function()
     for i = 1, 8 do terminal.resize(TTY[i], w, h) end
 end
 eventHooks.char[#eventHooks.char+1] = function(ev)
+    if not currentTTY.isLocked then
+        if currentTTY.flags.cbreak then currentTTY.buffer = currentTTY.buffer .. ev[2]
+        else currentTTY.preBuffer = currentTTY.preBuffer .. ev[2] end
+        if currentTTY.flags.echo then terminal.write(currentTTY, ev[2]) terminal.redraw(currentTTY) end
+    end
+end
+eventHooks.paste[#eventHooks.paste+1] = function(ev)
     if not currentTTY.isLocked then
         if currentTTY.flags.cbreak then currentTTY.buffer = currentTTY.buffer .. ev[2]
         else currentTTY.preBuffer = currentTTY.preBuffer .. ev[2] end
@@ -298,16 +307,23 @@ function terminal.resize(tty, width, height)
 end
 
 local function nextline(tty)
-    tty.cursor.y = tty.cursor.y + 1
-    if tty.cursor.y > tty.size.height then
+    local cursor = tty.cursor
+    local y = cursor.y + 1
+    cursor.y = y
+    local size = tty.size
+    local height = size.height
+    if y > height then
         --table.remove(tty, 1)
-        for i = 1, tty.size.height - 1 do
+        local dirtyLines = tty.dirtyLines
+        for i = 1, height - 1 do
             tty[i] = tty[i+1]
-            tty.dirtyLines[i] = true
+            dirtyLines[i] = true
         end
-        tty[tty.size.height] = {(' '):rep(tty.size.width), tty.colors.fg:rep(tty.size.width), tty.colors.bg:rep(tty.size.width)}
-        tty.dirtyLines[tty.size.height] = true
-        tty.cursor.y = tty.size.height
+        local width = size.width
+        local colors = tty.colors
+        tty[height] = {(' '):rep(width), colors.fg:rep(width), colors.bg:rep(width)}
+        dirtyLines[height] = true
+        cursor.y = height
     end
 end
 
@@ -316,7 +332,38 @@ end
 --       The biggest improvement will likely come from caching `tty.cursor.<x|y>`.
 
 local CSI = {
-    ['@'] = function(tty, params) end, -- ICH
+    ['@'] = function(tty, params)
+        local p = params[1] or 1
+        if p == 0 then p = 1 end
+        local xp, yp = p % tty.size.width, math.floor(p / tty.size.width)
+        local n = {
+            tty[tty.cursor.y][1]:sub(tty.size.width - xp + 1),
+            tty[tty.cursor.y][2]:sub(tty.size.width - xp + 1),
+            tty[tty.cursor.y][3]:sub(tty.size.width - xp + 1)
+        }
+        tty[tty.cursor.y][1] = tty[tty.cursor.y][1]:sub(1, tty.cursor.x - 1) .. (" "):rep(p) .. tty[tty.cursor.y+yp][1]:sub(tty.cursor.x, tty.size.width - xp)
+        tty[tty.cursor.y][2] = tty[tty.cursor.y][2]:sub(1, tty.cursor.x - 1) .. tty.colors.fg:rep(p) .. tty[tty.cursor.y+yp][2]:sub(tty.cursor.x, tty.size.width - xp)
+        tty[tty.cursor.y][3] = tty[tty.cursor.y][3]:sub(1, tty.cursor.x - 1) .. tty.colors.bg:rep(p) .. tty[tty.cursor.y+yp][3]:sub(tty.cursor.x, tty.size.width - xp)
+        tty.dirtyLines[tty.cursor.y] = true
+        for y = tty.cursor.y + yp + 1, tty.size.height do
+            local nn = {
+                tty[y-yp][1]:sub(tty.size.width - p + 1),
+                tty[y-yp][2]:sub(tty.size.width - p + 1),
+                tty[y-yp][3]:sub(tty.size.width - p + 1)
+            }
+            tty[y][1] = n[1] .. tty[y-yp][1]:sub(1, tty.size.width - xp)
+            tty[y][2] = n[2] .. tty[y-yp][2]:sub(1, tty.size.width - xp)
+            tty[y][3] = n[3] .. tty[y-yp][3]:sub(1, tty.size.width - xp)
+            tty.dirtyLines[y] = true
+            n = nn
+        end
+        for y = tty.cursor.y + 1, tty.cursor.y + yp do
+            tty[y][1] = (" "):rep(tty.size.width)
+            tty[y][2] = tty.colors.fg:rep(tty.size.width)
+            tty[y][3] = tty.colors.bg:rep(tty.size.width)
+            tty.dirtyLines[y] = true
+        end
+    end, -- ICH
     A = function(tty, params)
         local p = params[1] or 1
         if p == 0 then p = 1 end
@@ -330,12 +377,14 @@ local CSI = {
     C = function(tty, params)
         local p = params[1] or 1
         if p == 0 then p = 1 end
-        tty.cursor.x = math.min(tty.cursor.x + p, tty.size.width)
+        tty.cursor.y = tty.cursor.y + math.floor((tty.cursor.x - 1 + p) / tty.size.width)
+        tty.cursor.x = (tty.cursor.x - 1 + p) % tty.size.width + 1
     end, -- CUF
     D = function(tty, params)
         local p = params[1] or 1
         if p == 0 then p = 1 end
-        tty.cursor.x = math.max(tty.cursor.x - p, 1)
+        tty.cursor.y = tty.cursor.y + math.floor((tty.cursor.x - 1 - p) / tty.size.width)
+        tty.cursor.x = (tty.cursor.x - 1 - p) % tty.size.width + 1
     end, -- CUB
     E = function(tty, params)
         local p = params[1] or 1
@@ -419,7 +468,38 @@ local CSI = {
     M = function(tty, params) end, -- DL
     N = function(tty, params) end, -- EF
     O = function(tty, params) end, -- EA
-    P = function(tty, params) end, -- DCH
+    P = function(tty, params)
+        local p = params[1] or 1
+        if p == 0 then p = 1 end
+        local xp, yp = p % tty.size.width, math.floor(p / tty.size.width)
+        local n = {
+            (" "):rep(xp),
+            tty.colors.fg:rep(xp),
+            tty.colors.bg:rep(xp)
+        }
+        for y = tty.size.height - yp, tty.cursor.y + 1, -1 do
+            local nn = {
+                tty[y+yp][1]:sub(1, xp),
+                tty[y+yp][2]:sub(1, xp),
+                tty[y+yp][3]:sub(1, xp)
+            }
+            tty[y][1] = tty[y+yp][1]:sub(xp + 1) .. n[1]
+            tty[y][2] = tty[y+yp][2]:sub(xp + 1) .. n[2]
+            tty[y][3] = tty[y+yp][3]:sub(xp + 1) .. n[3]
+            tty.dirtyLines[y] = true
+            n = nn
+        end
+        for y = tty.size.height - yp + 1, tty.size.height do
+            tty[y][1] = (" "):rep(tty.size.width)
+            tty[y][2] = tty.colors.fg:rep(tty.size.width)
+            tty[y][3] = tty.colors.bg:rep(tty.size.width)
+            tty.dirtyLines[y] = true
+        end
+        tty[tty.cursor.y][1] = tty[tty.cursor.y][1]:sub(1, tty.cursor.x - 1) .. tty[tty.cursor.y+yp][1]:sub(tty.cursor.x + xp, tty.size.width) .. n[1]
+        tty[tty.cursor.y][2] = tty[tty.cursor.y][2]:sub(1, tty.cursor.x - 1) .. tty[tty.cursor.y+yp][2]:sub(tty.cursor.x + xp, tty.size.width) .. n[2]
+        tty[tty.cursor.y][3] = tty[tty.cursor.y][3]:sub(1, tty.cursor.x - 1) .. tty[tty.cursor.y+yp][3]:sub(tty.cursor.x + xp, tty.size.width) .. n[3]
+        tty.dirtyLines[tty.cursor.y] = true
+    end, -- DCH
     Q = function(tty, params) end, -- SSE
     R = function(tty, params) end, -- CPR
     S = function(tty, params)
@@ -471,7 +551,7 @@ local CSI = {
     m = function(tty, params)
         local n, m = params[1] or 0, params[2]
 
-        if n == 0 then tty.colors.fg, tty.colors.bg = '0', 'f'
+        if n == 0 then tty.colors.fg, tty.colors.bg, tty.colors.bold = '0', 'f', false
         elseif n == 1 then tty.colors.bold = true
         elseif n == 7 or n == 27 then tty.colors.fg, tty.colors.bg = tty.colors.bg, tty.colors.fg
         elseif n == 22 then tty.colors.bold = false
@@ -926,7 +1006,7 @@ function terminal.openterm(tty, process)
 
     function win.getTextColor()
         if not win then error("terminal is already closed", 2) end
-        return tonumber(buffer.colors.fg)
+        return tonumber(buffer.colors.fg, 16)
     end
 
     function win.setTextColor(color)
@@ -938,7 +1018,7 @@ function terminal.openterm(tty, process)
 
     function win.getBackgroundColor()
         if not win then error("terminal is already closed", 2) end
-        return tonumber(buffer.colors.bg)
+        return tonumber(buffer.colors.bg, 16)
     end
 
     function win.setBackgroundColor(color)

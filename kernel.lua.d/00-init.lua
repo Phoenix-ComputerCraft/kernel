@@ -8,7 +8,7 @@ do
         expect(1, num, "number")
         expect(2, min, "number", "nil")
         expect(3, max, "number", "nil")
-        if max < min then error("bad argument #3 (min must be less than or equal to max)", 2) end
+        if max and min and max < min then error("bad argument #3 (min must be less than or equal to max)", 2) end
         if num ~= num or num < (min or -math.huge) or num > (max or math.huge) then error(("number outside of range (expected %s to be within %s and %s)"):format(num, min or -math.huge, max or math.huge), 3) end
         return num
     end end
@@ -153,12 +153,15 @@ if _VERSION == "Lua 5.1" then
     end end
     if not table.unpack then table.unpack, unpack = unpack, nil end
 
-    local old_xpcall = xpcall
-    xpcall = function(f, errh, ...)
-        if select("#", ...) > 0 then
-            local args = table.pack(...)
-            return old_xpcall(function() return f(table.unpack(args, 1, args.n)) end, errh)
-        else return old_xpcall(f, errh) end
+    local _, v = xpcall(function(m) return m end, nil, true)
+    if not v then
+        local old_xpcall = xpcall
+        xpcall = function(f, errh, ...)
+            if select("#", ...) > 0 then
+                local args = table.pack(...)
+                return old_xpcall(function() return f(table.unpack(args, 1, args.n)) end, errh)
+            else return old_xpcall(f, errh) end
+        end
     end
 end
 
@@ -716,16 +719,6 @@ if not string.pack then
     end
 end
 
--- This adds the coroutine library to coroutine types, and allows calling coroutines to resume
--- ex: while coro:status() == "suspended" do coro("hello") end
--- This should be a thing in base Lua, but since not we'll make it available system-wide!
--- Programs can rely on this behavior existing (even though it may be unavailable if debug is disabled, but CC:T 1.96 removes the ability to disable it anyway)
--- Note: Unfortunately, CraftOS-PC v2.6.2 and earlier have a bug preventing this from working
-if debug then
-    local coro = setmetatable({}, {__index = coroutine, __newindex = function() end, __metatable = false})
-    debug.setmetatable(coroutine.running(), {__index = coro, __call = coroutine.resume})
-end
-
 -- Early version of panic function, before log initialization finishes (this is redefined later to use syslog)
 function panic(message)
     term.setBackgroundColor(32768)
@@ -830,10 +823,15 @@ function executeThread(process, thread, ev, dead, allWaiting)
             thread.yielding = nil
         else
             --syslog.debug("Resuming thread", tid)
+            local old = globalMetatables
+            globalMetatables = process.globalMetatables
+            updateGlobalMetatables()
             local start = procTime()
             params = table.pack(coroutine.resume(thread.coro, table.unpack(args, 1, args.n)))
             --syslog.debug("Yield", params.n, table.unpack(params, 1, params.n))
             process.cputime = process.cputime + (procTime() - start) / 1000
+            globalMetatables = old
+            updateGlobalMetatables()
         end
         if params[2] == "syscall" then
             --syslog.debug("Calling syscall", params[3])
@@ -845,7 +843,7 @@ function executeThread(process, thread, ev, dead, allWaiting)
                 thread.syscall_return = table.pack(xpcall(syscalls[params[3]], debug.traceback, process, thread, table.unpack(params, 4, params.n)))
                 process.systime = process.systime + (procTime() - start) / 1000
                 if not thread.syscall_return[1] and type(thread.syscall_return[2]) == "string" then
-                    syslog.log({level = "debug", category = "Syscall Failure", process = 0}, thread.syscall_return[2])
+                    syslog.log({level = "debug", category = "Syscall Failure", process = 0, module = params[3]}, thread.syscall_return[2])
                     thread.syscall_return[2] = thread.syscall_return[2]:gsub("kernel:%d+: ", "")
                 end
                 if thread.syscall_return[2] == kSyscallYield then
@@ -858,6 +856,7 @@ function executeThread(process, thread, ev, dead, allWaiting)
             allWaiting = false
         elseif coroutine.status(thread.coro) == "dead" then
             thread.status = "dead"
+            thread.return_value = params[2]
             if params[1] then process.lastReturnValue = {pid = process.id, thread = thread.id, value = params[2], n = params.n - 1, table.unpack(params, 2, params.n)}
             else process.lastReturnValue = {pid = process.id, thread = thread.id, error = params[2], traceback = debug.traceback(thread.coro)} end
             if not params[1] then
@@ -985,6 +984,43 @@ if not getfenv then
         end
         return fn
     end
+end
+
+-- Split global metatables into process-specific metatables
+globalMetatables = {
+    ["nil"] = {},
+    ["boolean"] = {},
+    ["number"] = {},
+    ["string"] = {__index = string},
+    ["function"] = {},
+    -- This adds the coroutine library to coroutine types, and allows calling coroutines to resume
+    -- ex: while coro:status() == "suspended" do coro("hello") end
+    -- This should be a thing in base Lua, but since not we'll make it available system-wide!
+    -- Programs can rely on this behavior existing
+    ["thread"] = {__index = coroutine, __call = coroutine.resume},
+    ["userdata"] = {}
+}
+
+local debug_getmetatable, debug_setmetatable = debug.getmetatable, debug.setmetatable
+function updateGlobalMetatables()
+    debug_setmetatable(nil, globalMetatables["nil"])
+    debug_setmetatable(false, globalMetatables["boolean"])
+    debug_setmetatable(0, globalMetatables["number"])
+    debug_setmetatable("", globalMetatables["string"])
+    debug_setmetatable(assert, globalMetatables["function"])
+    debug_setmetatable(coroutine.running(), globalMetatables["thread"])
+    if debug.upvalueid then debug_setmetatable(debug.upvalueid(executeThread, 1), globalMetatables["userdata"]) end
+end
+
+local type = type
+function debug.getmetatable(val)
+    if type(val) == "table" then return debug_getmetatable(val)
+    else return globalMetatables[type(val)] end
+end
+function debug.setmetatable(val, tab)
+    expect(2, tab, "table")
+    if type(val) == "table" then return debug_setmetatable(val, tab)
+    else globalMetatables[type(val)] = tab end
 end
 
 do
@@ -1148,10 +1184,10 @@ do
         [setlocal] = debug.setlocal,
         [getupvalue] = debug.getupvalue,
         [setupvalue] = debug.setupvalue,
-        [upvaluejoin] = debug.upvaluejoin,
         [getinfo] = debug.getinfo,
         [superprotect] = function() end,
     }
+    if debug.upvaluejoin then superprotected[upvaluejoin] = debug.upvaluejoin end
 
     protectedObjects = keys(setmetatable({}, {__mode = "k"}),
         getfenv,

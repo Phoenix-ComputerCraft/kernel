@@ -38,7 +38,7 @@ function makeRandom()
             else expect.range(max, 0, 0x7FFFFFFF) end
             local bound = max - min + 1
             local rand
-            if math.log(bound, 2) % 1 == 0 then rand = bit32.rshift((bound * next(31)), 31)
+            if math.log(bound, 2) % 1 == 0 then rand = math.floor((bound * next(31)) / 0x80000000)
             else
                 local bits
                 repeat
@@ -122,8 +122,9 @@ function createLuaLib(process)
 
     function G.print(...)
         local args = table.pack(...)
-        args[args.n+1] = "\n"
-        return do_syscall("write", table.unpack(args, 1, args.n + 1))
+        if args.n == 0 then args = {"", n = 1} end
+        args[args.n] = tostring(args[args.n]) .. "\n"
+        return do_syscall("write", table.unpack(args, 1, args.n))
     end
 
     G.coroutine = deepcopy(coroutine)
@@ -166,13 +167,13 @@ function createLuaLib(process)
                     while not stdin_buffer:find("%d") do
                         local r = do_syscall("readline")
                         if r == nil then break end
-                        stdin_buffer = stdin_buffer .. r
+                        stdin_buffer = stdin_buffer .. r .. "\n"
                     end
                 elseif fmt == "a" then
                     while true do
                         local r = do_syscall("readline")
                         if r == nil then break end
-                        stdin_buffer = stdin_buffer .. r
+                        stdin_buffer = stdin_buffer .. r .. "\n"
                     end
                 elseif fmt == "l" or fmt == "L" then
                     local r = do_syscall("readline")
@@ -382,22 +383,24 @@ function createLuaLib(process)
                 return setmetatable({_file = orhandle}, {__index = io_infile, __name = "FILE*"}), setmetatable({_file = iwhandle}, {__index = io_outfile, __name = "FILE*"})
             else
                 local buffer = ""
+                local closed = false
                 local pid
                 local rhandle = {
                     read = function(n)
-                        if buffer == "" then return nil
+                        if buffer == "" then
+                            if closed then return nil else return "" end -- TODO: yield instead of busy waiting
                         elseif n then
                             local s = buffer:sub(1, n)
                             buffer = buffer:sub(n + 1)
                             return s
                         else
-                            local s, e = buffer:match "([^\n]*)\n*()"
+                            local s, e = buffer:match "([^\n]*\n?)()"
                             buffer = buffer:sub(e)
                             return s
                         end
                     end,
                     readLine = function()
-                        local s, e = buffer:match "([^\n]*)\n*()"
+                        local s, e = buffer:match "([^\n]*\n?)()"
                         buffer = buffer:sub(e)
                         return s
                     end,
@@ -407,6 +410,7 @@ function createLuaLib(process)
                         return s
                     end,
                     close = function()
+                        closed = true
                         local info = do_syscall("getpinfo", pid)
                         if not info then return end
                         repeat local ev, param = coroutine.yield() until ev == "process_complete" and param.pid == pid
@@ -416,6 +420,7 @@ function createLuaLib(process)
                     write = function(s) buffer = buffer .. s end,
                     flush = function() end,
                     close = function()
+                        closed = true
                         local info = do_syscall("getpinfo", pid)
                         if not info then return end
                         repeat local ev, param = coroutine.yield() until ev == "process_complete" and param.pid == pid

@@ -158,7 +158,10 @@ function syscalls.syslog(process, thread, options, ...)
                 end
             end
             if ok then
-                process.queueEvent(v.pid, "syslog", v.id, options)
+                local process = processes[v.pid]
+                if process then
+                    process.eventQueue[#process.eventQueue+1] = {"syslog", deepcopy(options)}
+                end
             end
         end
     end
@@ -209,7 +212,7 @@ function syscalls.rmlog(process, thread, name)
     if name == "default" then error("Cannot delete default log", 0) end
     if not syslogs[name] then error("Log does not exist", 0) end
     if syslogs[name].stream then for _,v in pairs(syslogs[name].stream) do
-        process.queueEvent(v.pid, "syslog_close", v.id)
+        processes[v.pid].eventQueue[#processes[v.pid].eventQueue+1] = {"syslog_close", {id = v.id}}
         processes[v.pid].dependents[v.id] = nil
     end end
     syslogs[name] = nil
@@ -221,7 +224,7 @@ function syscalls.openlog(process, thread, name, filter)
     if not syslogs[name] then error("Log does not exist", 0) end
     if not syslogs[name].stream then error("Log does not have streaming enabled", 0) end
     local id = #process.dependents+1
-    local pid = process.pid
+    local pid = process.id
     process.dependents[id] = {type = "log", name = name, filter = filter, gc = function()
         for i,v in pairs(syslogs[name].stream) do
             if v.id == id and v.pid == pid then
@@ -240,7 +243,7 @@ function syscalls.closelog(process, thread, name)
         if not syslogs[name] then error("Log does not exist", 0) end
         if not syslogs[name].stream then error("Log does not have streaming enabled", 0) end
         for i,v in pairs(syslogs[name].stream) do
-            if v.pid == process.pid then
+            if v.pid == process.id then
                 process.dependents[v.id] = nil
                 syslogs[name].stream[i] = nil
             end
@@ -250,7 +253,7 @@ function syscalls.closelog(process, thread, name)
         if not process.dependents[name] then error("Log connection does not exist", 0) end
         local log = syslogs[process.dependents[name].name].stream
         for i,v in pairs(log) do
-            if v.pid == process.pid and v.id == name then
+            if v.pid == process.id and v.id == name then
                 process.dependents[v.id] = nil
                 log[i] = nil
                 break
@@ -284,20 +287,28 @@ local oldpanic = panic
 -- This function never returns.
 -- @tparam[opt] any message A message to display on screen
 function panic(message)
-    syslog.log({level = "panic"}, "Kernel panic:", message)
-    if debug then
-        local traceback = debug.traceback(nil, 2)
-        syslog.log({level = "panic", traceback = true}, traceback)
-    end
-    syslog.log({level = "panic"}, "We are hanging here...")
-    term.setCursorBlink(false)
-    while true do coroutine.yield() end
+    xpcall(function()
+        syslog.log({level = "panic"}, "Kernel panic:", message)
+        if debug then
+            local traceback = debug.traceback(nil, 2)
+            syslog.log({level = "panic", traceback = true}, traceback)
+        end
+        syslog.log({level = "panic"}, "We are hanging here...")
+        term.setCursorBlink(false)
+        while true do coroutine.yield() end
+    end, function(m)
+        oldpanic(message .. "; and an error occurred while logging the error: " .. m)
+    end)
 end
 
-syslogs.default.file = filesystem.open(KERNEL, "/var/log/default.log", "a")
-shutdownHooks[#shutdownHooks+1] = function() syslogs.default.file:close() end
+xpcall(function()
+    local err
+    syslogs.default.file, err = filesystem.open(KERNEL, "/var/log/default.log", "a")
+    shutdownHooks[#shutdownHooks+1] = function() if syslogs.default.file then syslogs.default.file.close() end end
 
-syslog.log("Starting Phoenix version", PHOENIX_VERSION, PHOENIX_BUILD)
-syslog.log("Initialized system logger")
-syslog.log("System started at " .. systemStartTime .. " on computer " .. os.computerID() .. (os.computerLabel() and "('" .. os.computerLabel() .. "')" or ""))
-syslog.log("Computer host is " .. _HOST)
+    syslog.log("Starting Phoenix version", PHOENIX_VERSION, PHOENIX_BUILD)
+    syslog.log("Initialized system logger")
+    syslog.log("System started at " .. systemStartTime .. " on computer " .. os.computerID() .. (os.computerLabel() and "('" .. os.computerLabel() .. "')" or ""))
+    syslog.log("Computer host is " .. _HOST)
+    if syslogs.default.file == nil then syslog.log({level = "notice"}, "An error occurred while opening the log file at /var/log/default.log:", err, ". System logs will not be saved to disk.") end
+end, panic)

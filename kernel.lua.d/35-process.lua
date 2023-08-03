@@ -1,3 +1,14 @@
+---@class Thread
+local thread_template = {
+    id = 0,
+    name = "",
+    coro = coroutine.create(function() end),
+    status = "starting",
+    args = {"a", n = 1},
+    filter = function(process, thread, event) end
+}
+
+---@class Process
 local process_template = {
     id = 1,
     name = "init",
@@ -17,17 +28,13 @@ local process_template = {
     eventQueue = {},
     signalHandlers = {},
     paused = false,
+    nice = 0,
     threads = {
-        [0] = {
-            id = 0,
-            name = "",
-            coro = coroutine.create(function() end),
-            status = "starting",
-            args = {"a", n = 1},
-            filter = function(process, thread, event) end
-        }
+        [0] = thread_template
     }
 }
+
+local nextProcessID = 1
 
 local function mkenv(process)
     local env = createLuaLib(process)
@@ -40,8 +47,28 @@ local function preempt_hook()
     coroutine.yield("preempt", "test", 7)
 end
 
+local process_loaders = {load}
+
+--- Adds a loader function to the list of loaders. These are used by exec(2) to
+--- load a file into a function.
+---@param loader fun(chunk:string,name:string,mode:string,env:table):function|nil The loader function to add
+function addProcessLoader(loader)
+    table.insert(process_loaders, 1, loader)
+end
+
+--- Removes a previously added loader function.
+---@param loader fun(chunk:string,name:string,mode:string,env:table):function|nil The loader function to remove
+function removeProcessLoader(loader)
+    for i, v in ipairs(process_loaders) do
+        if v == loader then
+            table.remove(process_loaders, i)
+            return
+        end
+    end
+end
+
 --- Finishes a process's resources so it can be removed cleanly.
--- @tparam Process process The process to reap
+---@param process Process The process to reap
 function reap_process(process)
     -- TODO: finish this
     syslog.debug("Reaping process " .. process.id .. " (" .. process.name .. ")")
@@ -71,30 +98,44 @@ function reap_process(process)
     end
 end
 
+---@param process Process
+---@param thread Thread
 function syscalls.getpid(process, thread)
     return process.id
 end
 
+---@param process Process
+---@param thread Thread
 function syscalls.getppid(process, thread)
     return process.parent
 end
 
+---@param process Process
+---@param thread Thread
 function syscalls.clock(process, thread)
     return process.cputime
 end
 
+---@param process Process
+---@param thread Thread
 function syscalls.getenv(process, thread)
     return process.vars
 end
 
+---@param process Process
+---@param thread Thread
 function syscalls.getname(process, thread)
     return process.name
 end
 
+---@param process Process
+---@param thread Thread
 function syscalls.getcwd(process, thread)
     return process.dir
 end
 
+---@param process Process
+---@param thread Thread
 function syscalls.chdir(process, thread, dir)
     expect(1, dir, "string")
     local stat = filesystem.stat(process, dir)
@@ -104,10 +145,14 @@ function syscalls.chdir(process, thread, dir)
     return true
 end
 
+---@param process Process
+---@param thread Thread
 function syscalls.getuser(process, thread)
     return process.user, process.realuser
 end
 
+---@param process Process
+---@param thread Thread
 function syscalls.setuser(process, thread, user)
     expect(1, user, "string")
     if process.user ~= "root" then error("Permission denied") end
@@ -115,10 +160,13 @@ function syscalls.setuser(process, thread, user)
     process.realuser = nil
 end
 
+---@param process Process
+---@param thread Thread
 function syscalls.fork(process, thread, func, name, ...)
     expect(1, func, "function")
     expect(2, name, "string", "nil")
-    local id = #processes + 1
+    local id = nextProcessID
+    nextProcessID = nextProcessID + 1
     processes[id] = {
         id = id,
         name = name or process.name,
@@ -131,6 +179,7 @@ function syscalls.fork(process, thread, func, name, ...)
         stdout = process.stdout,
         stderr = process.stderr,
         vars = deepcopy(process.vars),
+        globalMetatables = deepcopy(globalMetatables),
         cputime = 0,
         systime = 0,
         syscallyield = nil,
@@ -155,6 +204,7 @@ function syscalls.fork(process, thread, func, name, ...)
             [22] = function() return coroutine.yield("syscall", "suspend") end,
         },
         paused = false,
+        nice = 0,
         threads = {
             [0] = {
                 id = 0,
@@ -186,6 +236,8 @@ function syscalls.fork(process, thread, func, name, ...)
     return id
 end
 
+---@param process Process
+---@param thread Thread
 function syscalls.exec(process, thread, path, ...)
     expect(1, path, "string")
     local file, err = filesystem.open(process, path, "r")
@@ -196,7 +248,7 @@ function syscalls.exec(process, thread, path, ...)
     end
     local contents = file.readAll()
     file.close()
-    if contents:match("\x1bLua") then
+    if contents:find("[%z\1-\31]") then
         file, err = filesystem.open(process, path, "rb")
         if not file then error("Could not open file: " .. err, 0) end
         contents = file.readAll()
@@ -215,7 +267,11 @@ function syscalls.exec(process, thread, path, ...)
         syscalls.exec(process, thread, args[0], table.unpack(args, 1, i))
         process.name = "/" .. fs.combine(path:sub(1, 1) == "/" and "" or process.dir, path)
     else
-        local func, err = load(contents, "@" .. path, "bt", process.env)
+        local func, err
+        for _, loader in ipairs(process_loaders) do
+            func, err = loader(contents, "@" .. path, "bt", process.env)
+            if func then break end
+        end
         if not func then error("Could not execute file: " .. err, 0) end
         process.name = "/" .. fs.combine(path:sub(1, 1) == "/" and "" or process.dir, path)
         process.threads = {
@@ -228,11 +284,13 @@ function syscalls.exec(process, thread, path, ...)
                 filter = nil,
             }
         }
-        if args.preemptive then debug.sethook(process.threads[0].coro, preempt_hook, "", args.quantum) end
+        if args.preemptive then debug.sethook(process.threads[0].coro, preempt_hook, "", args.quantum * 10^(process.nice / -10)) end
     end
     if discord and process.stdin and process.stdin.isTTY and process.stdin.frontmostProcess == process then discord("Phoenix", "Executing " .. process.name) end
 end
 
+---@param process Process
+---@param thread Thread
 function syscalls.newthread(process, thread, func, ...)
     expect(1, func, "function")
     local id = #process.threads + 1
@@ -245,15 +303,19 @@ function syscalls.newthread(process, thread, func, ...)
         filter = nil,
     }
     setfenv(func, process.env)
-    if args.preemptive then debug.sethook(process.threads[id].coro, preempt_hook, "", args.quantum) end
+    if args.preemptive then debug.sethook(process.threads[id].coro, preempt_hook, "", args.quantum * 10^(process.nice / -10)) end
     return id
 end
 
+---@param process Process
+---@param thread Thread
 function syscalls.exit(process, thread, code)
     -- TODO
     for _, thread in pairs(process.threads) do thread.status = "dead" end
 end
 
+---@param process Process
+---@param thread Thread
 function syscalls.getplist(process, thread)
     local pids = {}
     for k in pairs(processes) do pids[#pids+1] = k end
@@ -261,6 +323,8 @@ function syscalls.getplist(process, thread)
     return pids
 end
 
+---@param process Process
+---@param thread Thread
 function syscalls.getpinfo(process, thread, pid)
     expect(1, pid, "number")
     local p = processes[pid]
@@ -293,6 +357,21 @@ function syscalls.getpinfo(process, thread, pid)
     }
 end
 
+---@param process Process
+---@param thread Thread
 function syscalls.suspend(process, thread)
     process.paused = true
+end
+
+---@param process Process
+---@param thread Thread
+function syscalls.nice(process, thread, level, pid)
+    expect(1, level, "number")
+    expect.range(level, -20, 20)
+    expect(2, pid, "number", "nil")
+    if level < 0 and process.user ~= "root" then error("Permission denied", 0) end
+    local target = pid and assert(processes[pid], "Invalid process ID") or process
+    if target.user ~= process.user and process.user ~= "root" then error("Permission denied", 0) end
+    target.nice = level
+    if args.preemptive then for _, t in pairs(target.threads) do debug.sethook(t.coro, preempt_hook, "", args.quantum * 10^(level / -10)) end end
 end

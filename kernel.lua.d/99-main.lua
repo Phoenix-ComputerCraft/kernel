@@ -1,11 +1,13 @@
 -- The device tree is initialized only once all kernel modules are fully loaded to avoid losses
-hardware.register(deviceTreeRoot, rootDriver)
+xpcall(hardware.register, function(error)
+    panic("An error occurred while registering devices: " .. error)
+end, deviceTreeRoot, rootDriver)
 local empty_packed_table = {n = 0}
 local init_process = processes[syscalls.fork(KERNEL, nil, function() end, "init")]
 local init_pid = init_process.id
 local init_ok, init_err
 if args.init then
-    init_ok, init_err = pcall(syscalls.exec, init_process, nil, args.init)
+    init_ok, init_err = pcall(syscalls.exec, init_process, nil, args.initrd and "/init" or args.init)
 end
 if not init_ok then
     syslog.log({level = "error", process = 0}, "Could not load init:", init_err)
@@ -147,7 +149,9 @@ while processes[init_pid] do
                 gotev = true
             end
             if ev or thread.status ~= "suspended" then
-                dead, allWaiting = executeThread(process, thread, ev or empty_packed_table, dead, allWaiting)
+                local allWait
+                dead, allWait = executeThread(process, thread, ev or empty_packed_table, dead, allWaiting)
+                allWaiting = allWait and allWaiting
             else dead = false end
         end
         if dead then

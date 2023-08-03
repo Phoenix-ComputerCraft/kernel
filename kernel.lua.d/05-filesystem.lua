@@ -1,6 +1,8 @@
 --- filesystem
 -- @section filesystem
 
+fs = fs -- silence global warnings
+
 --[[
     CraftOS mount metadata is stored in the following format: {
         meta = {
@@ -77,11 +79,13 @@ filesystems = {
                 setuser = false
             },
             contents = {}
-        }
+        },
+        metapath = "/meta.ltn"
     },
     tmpfs = {},
     drivefs = {},
     tablefs = {},
+    bind = {},
 }
 
 local function getRealPath(process, path)
@@ -106,7 +110,184 @@ local function getMount(process, path)
     return mounts[maxPath], p, maxPath
 end
 
-function filesystem.openfifo(process, obj, mode)
+--- Creates a new read file handle over string data.
+-- @tparam Process process The process to open as
+-- @tparam string data The contents of the file to read
+-- @tparam boolean binary Whether to open in binary mode
+-- @treturn[1] Handle The new file handle
+-- @treturn[2] nil If an error occurred
+-- @treturn[2] string An error message describing why the file couldn't be opened
+function filesystem.readhandle(process, data, binary)
+    local pos = 1
+    local closed = false
+    local t = {
+        readLine = function(newline)
+            if closed then error("attempt to use a closed file", 2) end
+            if pos > #data then return nil end
+            local d
+            d, pos = data:match("([^\n]*" .. (newline and "\n?)" or ")\n?") .. "()", pos)
+            return d
+        end,
+        readAll = function()
+            if closed then error("attempt to use a closed file", 2) end
+            if pos > #data then return nil end
+            local d = data:sub(pos)
+            pos = #d + 1
+            return d
+        end,
+        read = function(n)
+            if closed then error("attempt to use a closed file", 2) end
+            if n ~= nil and type(n) ~= "number" then error("bad argument #1 (expected number, got " .. type(n) .. ")", 2) end
+            n = n or 1
+            if pos > #data then return nil end
+            local d = data:sub(pos, pos + n - 1)
+            pos = pos + n
+            return d
+        end,
+        close = function()
+            if closed then error("attempt to use a closed file", 2) end
+            closed = true
+        end
+    }
+    if binary then
+        t.read = function(n)
+            if closed then error("attempt to use a closed file", 2) end
+            if n ~= nil and type(n) ~= "number" then error("bad argument #1 (expected number, got " .. type(n) .. ")", 2) end
+            if pos > #data then return nil end
+            if n then
+                local d = data:sub(pos, pos + n - 1)
+                pos = pos + n
+                return d
+            else
+                local d = data:byte(pos)
+                pos = pos + 1
+                return d
+            end
+        end
+        t.seek = function(whence, offset)
+            if whence ~= nil and type(whence) ~= "string" then error("bad argument #1 (expected string, got " .. type(whence) .. ")", 2) end
+            if offset ~= nil and type(offset) ~= "number" then error("bad argument #2 (expected number, got " .. type(offset) .. ")", 2) end
+            whence = whence or "cur"
+            offset = offset or 0
+            if closed then error("attempt to use closed file", 2) end
+            if whence == "set" then pos = offset + 1
+            elseif whence == "cur" then pos = pos + offset
+            elseif whence == "end" then pos = math.max(#data - offset, 1)
+            else error("Invalid whence", 2) end
+            return pos - 1
+        end
+    else
+        data = data:gsub("[\x80-\xFF]+", function(s)
+            local r = ""
+            if not pcall(function() for _, code in utf8.codes(s) do r = r .. (code < 256 and string.char(code) or "?") end end) then return s end
+            return r
+        end)
+    end
+    for _, v in pairs(t) do setfenv(v, process.env) debug.protect(v) end
+    return setmetatable(t, {__name = "file"})
+end
+
+--- Creates a new write file handle with a generic writer.
+-- @tparam Process process The process to open as
+-- @tparam function(data:string,reset:boolean) writer A function to call to write pending data to the file
+-- If reset is true, data contains the entire file and old contents should be replaced; otherwise, it contains just the new data to append
+-- @tparam boolean binary Whether to open in binary mode
+-- @treturn[1] Handle The new file handle
+-- @treturn[2] nil If an error occurred
+-- @treturn[2] string An error message describing why the file couldn't be opened
+function filesystem.writehandle(process, writer, binary)
+    local function setenv(t)
+        for _, v in pairs(t) do setfenv(v, process.env) debug.protect(v) end
+        return setmetatable(t, {__name = "file"})
+    end
+    local closed = false
+    if binary then
+        local pos = 1
+        local buf = ""
+        local partial = ""
+        return setenv {
+            write = function(d)
+                if closed then error("attempt to use a closed file", 2) end
+                if type(d) == "number" then
+                    buf, pos = buf:sub(1, pos - 1) .. string.char(d) .. buf:sub(pos + 1), pos + 1
+                    if partial then partial = partial .. string.char(d) end
+                elseif type(d) == "string" then
+                    buf, pos = buf:sub(1, pos - 1) .. d .. buf:sub(pos + #d), pos + #d
+                    if partial then partial = partial .. d end
+                else error("bad argument #1 (expected string or number, got " .. type(d) .. ")", 2) end
+            end,
+            writeLine = function(d)
+                if closed then error("attempt to use a closed file", 2) end
+                if type(d) == "number" then
+                    buf, pos = buf:sub(1, pos - 1) .. string.char(d) .. "\n" .. buf:sub(pos + 2), pos + 2
+                    if partial then partial = partial .. string.char(d) .. "\n" end
+                elseif type(d) == "string" then
+                    buf, pos = buf:sub(1, pos - 1) .. d .. "\n" .. buf:sub(pos + #d + 1), pos + #d + 1
+                    if partial then partial = partial .. d .. "\n" end
+                else error("bad argument #1 (expected string or number, got " .. type(d) .. ")", 2) end
+            end,
+            seek = function(whence, offset)
+                if whence ~= nil and type(whence) ~= "string" then error("bad argument #1 (expected string, got " .. type(whence) .. ")", 2) end
+                if offset ~= nil and type(offset) ~= "number" then error("bad argument #2 (expected number, got " .. type(offset) .. ")", 2) end
+                whence = whence or "cur"
+                offset = offset or 0
+                if closed then error("attempt to use closed file", 2) end
+                local oldp = pos
+                if whence == "set" then pos = offset + 1
+                elseif whence == "cur" then pos = pos + offset
+                elseif whence == "end" then pos = math.max(#buf - offset, 1)
+                else error("Invalid whence", 2) end
+                if oldp ~= pos then partial = nil end
+                return pos - 1
+            end,
+            flush = function()
+                if closed then error("attempt to use a closed file", 2) end
+                if partial then writer(partial, false)
+                else writer(buf, true) end
+                partial = ""
+            end,
+            close = function()
+                if closed then error("attempt to use a closed file", 2) end
+                closed = true
+                if partial then writer(partial, false)
+                else writer(buf, true) end
+                partial = ""
+            end
+        }
+    else
+        local buf = ""
+        return setenv {
+            write = function(d)
+                if closed then error("attempt to use a closed file", 2) end
+                buf = buf .. tostring(d)
+            end,
+            writeLine = function(d)
+                if closed then error("attempt to use a closed file", 2) end
+                buf = buf .. tostring(d) .. "\n"
+            end,
+            flush = function()
+                if closed then error("attempt to use a closed file", 2) end
+                writer(buf, false)
+                buf = ""
+            end,
+            close = function()
+                if closed then error("attempt to use a closed file", 2) end
+                writer(buf, false)
+                buf = ""
+                closed = true
+            end
+        }
+    end
+end
+
+--- Creates a new file handle for a generic FIFO object.
+-- @tparam Process process The process to open as
+-- @tparam {data=string} obj A handle for the shared FIFO data
+-- @tparam string mode The mode to open in
+-- @treturn[1] Handle The new file handle
+-- @treturn[2] nil If an error occurred
+-- @treturn[2] string An error message describing why the file couldn't be opened
+function filesystem.fifohandle(process, obj, mode)
     local closed = false
     local function setenv(t)
         for _, v in pairs(t) do setfenv(v, process.env) debug.protect(v) end
@@ -237,6 +418,7 @@ function filesystem.openfifo(process, obj, mode)
         }
     else return nil, "Invalid mode" end
 end
+filesystem.openfifo = filesystem.fifohandle -- compatibility
 
 -- craftos fs implementation
 
@@ -245,6 +427,23 @@ do
     if file then
         filesystems.craftos.meta = unserialize(file.readAll()) or filesystems.craftos.meta
         file.close()
+    end
+end
+
+if args.fsmeta then
+    local file = fs.open(args.fsmeta, "r")
+    if file then
+        local meta = unserialize(file.readAll())
+        file.close()
+        if meta then
+            local function merge(src, dest)
+                for k, v in pairs(src) do
+                    if dest[k] and type(dest[k]) == "table" and type(v) == "table" then merge(v, dest[k])
+                    else dest[k] = v end
+                end
+            end
+            merge(meta, filesystems.craftos.meta)
+        end
     end
 end
 
@@ -311,7 +510,7 @@ function filesystems.craftos:setmeta(user, path, meta, nolink)
         }
         if meta.type ~= "directory" then t.contents = nil end
     else stack[#stack].contents[name] = nil end
-    local file = fs.open("/meta.ltn", "w")
+    local file = assert(fs.open(self.metapath, "w"))
     file.write(serialize(self.meta, {compact = true}))
     file.close()
 end
@@ -379,7 +578,7 @@ function filesystems.craftos:open(process, path, mode)
             fifo = {data = ""}
             fifos[meta] = fifo
         end
-        return filesystem.openfifo(process, fifo, mode)
+        return filesystem.fifohandle(process, fifo, mode)
     end
     return setmetatable(fs.open(fs.combine(self.path, path), mode), {__name = "file"})
 end
@@ -407,13 +606,7 @@ function filesystems.craftos:stat(process, path, nolink)
     attr.modification = nil
     attr.capacity = fs.getCapacity(p)
     attr.freeSpace = fs.getFreeSpace(p)
-    if attr.isReadOnly then
-        -- If the file is read-only, it's from the ROM so permissions can't be set
-        -- No owner
-        attr.permissions = {}
-        attr.worldPermissions = {read = true, write = false, execute = true}
-        return attr
-    end
+    local ro = attr.isReadOnly
     attr.isReadOnly = nil
     local meta = self:getmeta(process.user, fs.combine(self.path, path), nolink)
     -- The path may exist on the filesystem but have no metadata.
@@ -431,6 +624,10 @@ function filesystems.craftos:stat(process, path, nolink)
         }
         attr.worldPermissions = {read = true, write = false, execute = true}
         attr.setuser = false
+    end
+    if ro then
+        attr.worldPermissions.write = false
+        for _, v in pairs(attr.permissions) do v.write = false end
     end
     return attr
 end
@@ -671,162 +868,30 @@ function filesystems.tmpfs:new(process, src, options)
 end
 
 function filesystems.tmpfs:_open_internal(process, path, mode)
-    local pos = 1
-    local closed = false
-    local function setenv(t)
-        for _, v in pairs(t) do setfenv(v, process.env) debug.protect(v) end
-        return setmetatable(t, {__name = "file"})
-    end
     local epoch = os.epoch
-    if mode == "r" then
-        local data = self:getpath(process.user, path).data
-        return setenv {
-            readLine = function(newline)
-                if closed then error("attempt to use a closed file", 2) end
-                if pos > #data then return nil end
-                local d
-                d, pos = data:match("([^\n]*" .. (newline and "\n?)" or ")\n?") .. "()", pos)
-                return d
-            end,
-            readAll = function()
-                if closed then error("attempt to use a closed file", 2) end
-                if pos > #data then return nil end
-                local d = data:sub(pos)
-                pos = #d + 1
-                return d
-            end,
-            read = function(n)
-                if closed then error("attempt to use a closed file", 2) end
-                if n ~= nil and type(n) ~= "number" then error("bad argument #1 (expected number, got " .. type(n) .. ")", 2) end
-                n = n or 1
-                if pos > #data then return nil end
-                local d = data:sub(pos, pos + n - 1)
-                pos = pos + n
-                return d
-            end,
-            close = function()
-                if closed then error("attempt to use a closed file", 2) end
-                closed = true
-            end
-        }
-    elseif mode == "w" or mode == "a" then
-        local data = self:getpath(process.user, path)
-        if mode == "w" then data.data, data.modified = "", epoch "utc" else pos = #data.data end
-        local buf = data.data
-        return setenv {
-            write = function(d)
-                if closed then error("attempt to use a closed file", 2) end
-                buf = buf .. tostring(d)
-            end,
-            writeLine = function(d)
-                if closed then error("attempt to use a closed file", 2) end
-                buf = buf .. tostring(d) .. "\n"
-            end,
-            flush = function()
-                if closed then error("attempt to use a closed file", 2) end
-                data.data, data.modified = buf, epoch "utc"
-                if self.__flush then self:__flush() end
-            end,
-            close = function()
-                if closed then error("attempt to use a closed file", 2) end
-                data.data, data.modified = buf, epoch "utc"
-                closed = true
-                if self.__flush then self:__flush() end
-            end
-        }
-    elseif mode == "rb" then
-        local data = self:getpath(process.user, path).data
-        return setenv {
-            readLine = function(newline)
-                if closed then error("attempt to use a closed file", 2) end
-                if pos > #data then return nil end
-                local d
-                d, pos = data:match("([^\n]*" .. (newline and "\n?)" or ")\n?") .. "()", pos)
-                return d
-            end,
-            readAll = function()
-                if closed then error("attempt to use a closed file", 2) end
-                if pos > #data then return nil end
-                local d = data:sub(pos)
-                pos = #d + 1
-                return d
-            end,
-            read = function(n)
-                if closed then error("attempt to use a closed file", 2) end
-                if n ~= nil and type(n) ~= "number" then error("bad argument #1 (expected number, got " .. type(n) .. ")", 2) end
-                if pos > #data then return nil end
-                if n then
-                    local d = data:sub(pos, pos + n - 1)
-                    pos = pos + n
-                    return d
-                else
-                    local d = data:byte(pos)
-                    pos = pos + 1
-                    return d
-                end
-            end,
-            seek = function(whence, offset)
-                if whence ~= nil and type(whence) ~= "string" then error("bad argument #1 (expected string, got " .. type(whence) .. ")", 2) end
-                if offset ~= nil and type(offset) ~= "number" then error("bad argument #2 (expected number, got " .. type(offset) .. ")", 2) end
-                whence = whence or "cur"
-                offset = offset or 0
-                if closed then error("attempt to use closed file", 2) end
-                if whence == "set" then pos = offset + 1
-                elseif whence == "cur" then pos = pos + offset
-                elseif whence == "end" then pos = math.max(#data - offset, 1)
-                else error("Invalid whence", 2) end
-                return pos - 1
-            end,
-            close = function()
-                if closed then error("attempt to use a closed file", 2) end
-                closed = true
-            end
-        }
-    elseif mode == "wb" or mode == "ab" then
-        local data = self:getpath(process.user, path)
-        if mode == "wb" then data.data, data.modified = "", epoch "utc" else pos = #data.data end
-        local buf = data.data
-        return setenv {
-            write = function(d)
-                if closed then error("attempt to use a closed file", 2) end
-                if type(d) == "number" then buf, pos = buf:sub(1, pos - 1) .. string.char(d) .. buf:sub(pos + 1), pos + 1
-                elseif type(d) == "string" then buf, pos = buf:sub(1, pos - 1) .. d .. buf:sub(pos + #d), pos + #d
-                else error("bad argument #1 (expected string or number, got " .. type(d) .. ")", 2) end
-            end,
-            writeLine = function(d)
-                if closed then error("attempt to use a closed file", 2) end
-                if type(d) == "number" then buf, pos = buf:sub(1, pos - 1) .. string.char(d) .. "\n" .. buf:sub(pos + 2), pos + 2
-                elseif type(d) == "string" then buf, pos = buf:sub(1, pos - 1) .. d .. "\n" .. buf:sub(pos + #d + 1), pos + #d + 1
-                else error("bad argument #1 (expected string or number, got " .. type(d) .. ")", 2) end
-            end,
-            seek = function(whence, offset)
-                if whence ~= nil and type(whence) ~= "string" then error("bad argument #1 (expected string, got " .. type(whence) .. ")", 2) end
-                if offset ~= nil and type(offset) ~= "number" then error("bad argument #2 (expected number, got " .. type(offset) .. ")", 2) end
-                whence = whence or "cur"
-                offset = offset or 0
-                if closed then error("attempt to use closed file", 2) end
-                if whence == "set" then pos = offset + 1
-                elseif whence == "cur" then pos = pos + offset
-                elseif whence == "end" then pos = math.max(#buf - offset, 1)
-                else error("Invalid whence", 2) end
-                return pos - 1
-            end,
-            flush = function()
-                if closed then error("attempt to use a closed file", 2) end
-                data.data, data.modified = buf, epoch "utc"
-                if self.__flush then self:__flush() end
-            end,
-            close = function()
-                if closed then error("attempt to use a closed file", 2) end
-                data.data, data.modified = buf, epoch "utc"
-                closed = true
-                if self.__flush then self:__flush() end
-            end
-        }
+    local data = self:getpath(process.user, path)
+    if not data then return nil, "No such file" end
+    if mode == "r" or mode == "rb" then return filesystem.readhandle(process, data.data, mode == "rb")
+    elseif mode == "w" or mode == "wb" then
+        data.data = ""
+        data.modified = epoch "utc"
+        return filesystem.writehandle(process, function(buf, full)
+            if full then data.data = buf else data.data = data.data .. buf end
+            data.modified = epoch "utc"
+            if self.__flush then self:__flush() end
+        end, mode == "wb")
+    elseif mode == "a" or mode == "ab" then
+        local orig = data.data
+        return filesystem.writehandle(process, function(buf, full)
+            if full then data.data = orig .. buf else data.data = data.data .. buf end
+            data.modified = epoch "utc"
+            if self.__flush then self:__flush() end
+        end, mode == "ab")
     else return nil, "Invalid mode" end
 end
 
 function filesystems.tmpfs:open(process, path, mode)
+    if self.readOnly and (mode:sub(1, 1) == "w" or mode:sub(1, 1) == "a") then return nil, "Read-only filesystem" end
     local ok, stat = pcall(self.stat, self, process, path)
     if not ok then
         if type(stat) == "table" then error(stat) end
@@ -877,7 +942,7 @@ function filesystems.tmpfs:open(process, path, mode)
             fifo = {data = ""}
             fifos[meta] = fifo
         end
-        return filesystem.openfifo(process, fifo, mode)
+        return filesystem.fifohandle(process, fifo, mode)
     end
     return self:_open_internal(process, path, mode)
 end
@@ -909,12 +974,13 @@ function filesystems.tmpfs:stat(process, path, nolink)
         setuser = data.setuser,
         capacity = math.huge,
         freeSpace = math.huge,
-        link = data.link,
+        link = rawget(data, "link"),
         special = {}
     }
 end
 
 function filesystems.tmpfs:remove(process, path)
+    if self.readOnly then error("Read-only filesystem", 2) end
     local parent = self:getpath(process.user, fs.getDir(path))
     local name = fs.getName(path)
     if not parent or parent.type ~= "directory" or not parent.contents[name] then return end
@@ -935,6 +1001,7 @@ function filesystems.tmpfs:remove(process, path)
 end
 
 function filesystems.tmpfs:rename(process, from, to)
+    if self.readOnly then error("Read-only filesystem", 2) end
     local fparent = self:getpath(process.user, fs.getDir(from))
     local fname = fs.getName(from)
     if not fparent or fparent.type ~= "directory" or not fparent.contents[fname] then error(from .. ": No such file or directory", 2) end
@@ -953,6 +1020,7 @@ function filesystems.tmpfs:rename(process, from, to)
 end
 
 function filesystems.tmpfs:mkdir(process, path)
+    if self.readOnly then error("Read-only filesystem", 2) end
     local t = self
     for _,p in ipairs(split(path, "/\\")) do
         local perms = t.permissions[process.user] or t.worldPermissions
@@ -978,6 +1046,7 @@ function filesystems.tmpfs:mkdir(process, path)
 end
 
 function filesystems.tmpfs:link(process, path, location)
+    if self.readOnly then error("Read-only filesystem", 2) end
     local stat = self:stat(process, path)
     if stat then error(path .. ": File exists", 2) end
     local pok, pstat = pcall(self.stat, self, process, fs.getDir(path))
@@ -1003,6 +1072,7 @@ function filesystems.tmpfs:link(process, path, location)
 end
 
 function filesystems.tmpfs:mkfifo(process, path)
+    if self.readOnly then error("Read-only filesystem", 2) end
     local stat = self:stat(process, path)
     if stat then error(path .. ": File exists", 2) end
     local pok, pstat = pcall(self.stat, self, process, fs.getDir(path))
@@ -1027,6 +1097,7 @@ function filesystems.tmpfs:mkfifo(process, path)
 end
 
 function filesystems.tmpfs:chmod(process, path, user, mode)
+    if self.readOnly then error("Read-only filesystem", 2) end
     local stat = self:getpath(process.user, path, true)
     if not stat then error(path .. ": No such file or directory", 2) end
     if not stat.owner or (process.user ~= "root" and process.user ~= stat.owner) then error(path .. ": Permission denied", 2) end
@@ -1085,6 +1156,7 @@ function filesystems.tmpfs:chmod(process, path, user, mode)
 end
 
 function filesystems.tmpfs:chown(process, path, owner)
+    if self.readOnly then error("Read-only filesystem", 2) end
     local stat = self:getpath(process.user, path, true)
     if not stat then error(path .. ": No such file or directory", 2) end
     if not stat.owner or (process.user ~= "root" and process.user ~= stat.owner) then error(path .. ": Permission denied", 2) end
@@ -1093,7 +1165,7 @@ function filesystems.tmpfs:chown(process, path, owner)
 end
 
 function filesystems.tmpfs:info()
-    return "tmpfs", "memory", {}
+    return "tmpfs", "memory", {ro = self.readOnly}
 end
 
 -- drivefs implementation
@@ -1101,11 +1173,48 @@ end
 
 setmetatable(filesystems.drivefs, {__index = filesystems.craftos})
 
+function filesystems.drivefs:stat(process, path)
+    local res, err = filesystems.craftos.stat(self, process, path)
+    if path == "" and res == nil then return {
+        size = 0,
+        type = "directory",
+        created = 0,
+        modified = 0,
+        owner = self.owner,
+        capacity = 0,
+        freeSpace = 0,
+        permissions = {[self.owner] = {read = false, write = true, execute = false}},
+        worldPermissions = {read = false, write = false, execute = false},
+        setuser = false
+    } end
+    return res, err
+end
+
 function filesystems.drivefs:new(process, src, options)
     local drive = hardware.get(src)
     if not drive then error("Could not find drive at " .. src) end
-    local fs = filesystems.craftos:new(process, hardware.call(process, drive, "getMountPath"), options)
+    local path = hardware.call(process, drive, "getMountPath")
+    local fs = filesystems.craftos:new(process, path, options)
     fs.drive = drive.uuid
+    fs.owner = process.user
+    fs.meta = {
+        meta = {
+            type = "directory",
+            owner = "root",
+            permissions = {
+                root = {read = true, write = true, execute = true}
+            },
+            worldPermissions = {read = true, write = false, execute = true},
+            setuser = false
+        },
+        contents = {}
+    }
+    fs.metapath = fs.combine(path, ".meta.ltn")
+    local file = fs.open(fs.metapath, "r")
+    if file then
+        fs.meta = unserialize(file.readAll()) or fs.meta
+        file.close()
+    end
     return setmetatable(fs, {__index = self})
 end
 
@@ -1115,14 +1224,17 @@ end
 
 -- tablefs implementation
 -- tablefs just inherits from tmpfs, but automatically loads the structure from a file (and can optionally be saved).
+-- options: ro = do not allow writing to files; rw = flush data to disk after writing (neither = keep changes in memory only)
 
 setmetatable(filesystems.tablefs, {__index = filesystems.tmpfs})
 
 function filesystems.tablefs:new(process, src, options)
     local t
-    local file, err = filesystem.open(process, src, "r")
+    local file, err
+    if process == KERNEL and mounts[""] then file, err = filesystem.open(process, src, "r")
+    else file, err = fs.open(src, "r") end
     if file then
-        local data = file.readAll()
+        local data = file.readAll() or ""
         file.close()
         local ok, res = pcall(unserialize, data)
         if not ok then error("Could not mount " .. src .. ": " .. res, 3)
@@ -1144,6 +1256,7 @@ function filesystems.tablefs:new(process, src, options)
         }
     end
     t.src = src
+    t.readOnly = options.ro
     if options.rw and not options.ro then function t:__flush()
         local f, s = self.__flush, self.src
         self.__flush, self.src = nil
@@ -1159,7 +1272,62 @@ function filesystems.tablefs:new(process, src, options)
 end
 
 function filesystems.tablefs:info()
-    return "tablefs", self.src, {rw = self.__flush ~= nil, ro = self.__flush == nil}
+    return "tablefs", self.src, {rw = self.__flush ~= nil, ro = self.readOnly}
+end
+
+-- bind implementation
+
+function filesystems.bind:new(process, path, options)
+    local stat, err = filesystem.stat(process, path)
+    if not stat then error("Could not bind " .. path .. ": " .. err, 3)
+    elseif stat.type ~= "directory" then error("Could not bind " .. path .. ": Not a directory", 3) end
+    return setmetatable({
+        path = path
+    }, {__index = self})
+end
+
+function filesystems.bind:open(process, path, mode)
+    return filesystem.open(process, fs.combine(self.path, path), mode)
+end
+
+function filesystems.bind:list(process, path)
+    return filesystem.list(process, fs.combine(self.path, path))
+end
+
+function filesystems.bind:stat(process, path, nolink)
+    return filesystem.stat(process, fs.combine(self.path, path), nolink)
+end
+
+function filesystems.bind:remove(process, path)
+    return filesystem.remove(process, fs.combine(self.path, path))
+end
+
+function filesystems.bind:rename(process, from, to)
+    return filesystem.rename(process, fs.combine(self.path, from), fs.combine(self.path, to))
+end
+
+function filesystems.bind:mkdir(process, path)
+    return filesystem.mkdir(process, fs.combine(self.path, path))
+end
+
+function filesystems.bind:link(process, path, location)
+    return filesystem.link(process, fs.combine(self.path, path), location)
+end
+
+function filesystems.bind:mkfifo(process, path)
+    return filesystem.mkfifo(process, fs.combine(self.path, path))
+end
+
+function filesystems.bind:chmod(process, path, user, mode)
+    return filesystem.chmod(process, fs.combine(self.path, path), user, mode)
+end
+
+function filesystems.bind:chown(process, path, owner)
+    return filesystem.chown(process, fs.combine(self.path, path), owner)
+end
+
+function filesystems.bind:info()
+    return "bind", self.path, {}
 end
 
 -- Syscalls
@@ -1208,6 +1376,8 @@ end
 -- @tparam Process process The process to operate as
 -- @tparam string path The file path to stat, which may be absolute or relative
 -- to the process's working directory
+-- @tparam boolean nolink Whether to not follow a link at the destination path,
+-- returning the link itself instead of its target
 -- @treturn[1] table A table with information about the path (see the docs for
 -- the `stat` syscall for more info)
 -- @treturn[2] nil If an error occurred
@@ -1219,7 +1389,7 @@ function filesystem.stat(process, path, nolink)
         local ok, mount, p, mp = pcall(getMount, process, path)
         if not ok then return nil, mount end
         local ok2, res, err = pcall(mount.stat, mount, process, p, nolink)
-        if ok then
+        if ok2 then
             if res then res.mountpoint = "/" .. mp end
             return res, err
         elseif type(res) ~= "table" or type(res.path) ~= "string" then error(res, 2) end
@@ -1291,6 +1461,7 @@ function filesystem.link(process, path, location)
     expect(2, location, "string")
     repeat
         local mount, p = getMount(process, path)
+        if not mount.link then error("Filesystem does not support links", 2) end
         local ok, res = pcall(mount.link, mount, process, p, location)
         if ok then return
         elseif type(res) ~= "table" or type(res.path) ~= "string" then error(res, 2) end
@@ -1306,6 +1477,7 @@ function filesystem.mkfifo(process, path)
     expect(1, path, "string")
     repeat
         local mount, p = getMount(process, path)
+        if not mount.mkfifo then error("Filesystem does not support FIFOs", 2) end
         local ok, res = pcall(mount.mkfifo, mount, process, p)
         if ok then return
         elseif type(res) ~= "table" or type(res.path) ~= "string" then error(res, 2) end
@@ -1369,7 +1541,7 @@ function filesystem.chroot(process, path)
     if process.user ~= "root" then error("Could not change root: Permission denied", 2) end
     local newroot = filesystem.combine(process.root, path) .. "/"
     if newroot:find(process.root, 1, true) ~= 1 then error("Could not change root: No such file or directory", 2) end
-    local s = filesystem.stat("/" .. path)
+    local s = filesystem.stat(process, "/" .. path)
     if not s then error(path .. ": No such directory", 2) end
     if s.type ~= "directory" then error(path .. ": Not a directory", 2) end
     process.root = newroot
@@ -1389,10 +1561,16 @@ function filesystem.mount(process, type, src, dest, options)
     expect(4, options, "table", "nil")
     if not filesystems[type] then error("No such filesystem '" .. type .. "'", 2) end
     local p = getRealPath(process, dest)
-    local stat = filesystem.stat(process, dest)
-    if not stat then error("Could not mount to " .. dest .. ": No such directory", 2)
-    elseif stat.type ~= "directory" then error("Could not mount to " .. dest .. ": Not a directory", 2)
-    elseif process.user ~= "root" and not (stat.permissions[process.user] or stat.worldPermissions).write then error("Could not mount to " .. dest .. ": Permission denied", 2) end
+    if p == "" then
+        if process.user ~= "root" then error("Could not mount to " .. dest .. ": Permission denied", 2)
+        elseif mounts[p] then error("Could not mount to " .. dest .. ": Mount already exists") end
+    else
+        local stat = filesystem.stat(process, dest)
+        if not stat then error("Could not mount to " .. dest .. ": No such directory", 2)
+        elseif stat.type ~= "directory" then error("Could not mount to " .. dest .. ": Not a directory", 2)
+        elseif process.user ~= "root" and not (stat.permissions[process.user] or stat.worldPermissions).write then error("Could not mount to " .. dest .. ": Permission denied", 2)
+        elseif mounts[p] then error("Could not mount to " .. dest .. ": Mount already exists") end
+    end
     local mount = filesystems[type]:new(process, src, options or {})
     mounts[p] = mount
 end
@@ -1418,7 +1596,7 @@ function filesystem.mountlist(process)
     for k, v in pairs(mounts) do
         if "/" .. k .. "/" == process.root or k:find(process.root:sub(2), 1, true) == 1 then
             local type, path, options = v:info()
-            retval[#retval+1] = {path = k, type = type, source = path, options = options}
+            retval[#retval+1] = {path = "/" .. k, type = type, source = path, options = options}
         end
     end
     return retval
@@ -1488,4 +1666,26 @@ function syscalls.loadCraftOSAPI(process, thread, apiName)
     end
 end
 
-mounts[""] = filesystems[args.rootfstype]:new(KERNEL, args.root, {})
+xpcall(function()
+    if args.initrd then
+        if args.initrd:match "^_G%.." then
+            local root = _G[args.initrd:match "^_G%.(.+)"]
+            if type(root) ~= "table" then error("Requested root filesystem in global '" .. args.initrd .. "' is not a table") end
+            root.src = args.initrd
+            mounts[""] = setmetatable(root, {__index = filesystems.tablefs})
+        else mounts[""] = filesystems.tablefs:new(KERNEL, args.initrd, {}) end
+    else
+        local options = {}
+        if args.rootflags then
+            for m in args.rootflags:gmatch "[^,]+" do
+                local k, v = m:match("^([^=]+)=(.*)$")
+                if k and v then
+                    if v == "true" then options[k] = true
+                    elseif v == "false" then options[k] = false
+                    else options[k] = tonumber(v) or v end
+                else options[m] = true end
+            end
+        end
+        mounts[""] = filesystems[args.rootfstype]:new(KERNEL, args.root, options)
+    end
+end, panic)
