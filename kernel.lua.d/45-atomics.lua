@@ -2,19 +2,15 @@ local nextMutexID = 0
 
 function syscalls.lockmutex(process, thread, mtx)
     expect(1, mtx, "table")
+    while mtx.owner ~= nil and mtx.owner ~= thread.id do coroutine.yield() end
     if mtx.owner then
-        if mtx.owner ~= thread.id then
-            thread.filter = function(process, thread)
-                return mtx.owner == nil or mtx.owner == thread.id
-            end
-            return kSyscallYield, "lockmutex", mtx
-        elseif type(mtx.recursive) == "number" then
+        if type(mtx.recursive) == "number" then
             mtx.recursive = mtx.recursive + 1
+            return
         else error("cannot recursively lock mutex", 0) end
-    else
-        mtx.owner = thread.id
-        if mtx.recursive then mtx.recursive = 1 end
     end
+    mtx.owner = thread.id
+    if mtx.recursive then mtx.recursive = 1 end
 end
 
 function syscalls.__timeout_check(process, thread, info)
@@ -77,12 +73,7 @@ end
 function syscalls.acquiresemaphore(process, thread, sem)
     expect(1, sem, "table")
     expect.field(sem, "count", "number")
-    if sem.count <= 0 then
-        thread.filter = function(process, thread)
-            return type(sem.count) ~= "number" or sem.count > 0
-        end
-        return kSyscallYield, "acquiresemaphore", sem
-    end
+    while sem.count <= 0 do coroutine.yield() end
     sem.count = sem.count - 1
 end
 

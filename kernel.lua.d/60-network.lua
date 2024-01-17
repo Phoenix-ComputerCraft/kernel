@@ -77,6 +77,7 @@ local routes = {maxn = 0, [0] = {}}
 local arptable = {}
 local protocols = {send = {}, recv = {}}
 local openSockets = {}
+local openSocketIDs = {}
 local networkListeners = setmetatable({}, {__mode = "k"})
 local waiting = {arp = {}, socket = {}}
 local usedMessageIDs = {}
@@ -273,18 +274,26 @@ protocols.send.socket = {}
 function protocols.send.socket.connect(info, ip, port, socket)
     for i = 1, 16384 do
         local p = math.random(49152, 65535)
-        if not openSockets[p] then socket.localPort = p break end
+        if not openSockets[p] or not openSockets[p][port] then socket.localPort = p break end
     end
     if not socket.localPort then error("Too many open sockets") end
     socket.id = nextHandleID
     nextHandleID = nextHandleID + 1
     socket.ip = ip
     socket.port = port
-    socket.sendSeq = math.floor(math.random()*0x1000000000000)
+    socket.sendSeq = math.floor(math.random()*0x10000000000)
     socket.sendSeqNext = socket.sendSeq + 2
     socket.sendSeqMax = socket.sendSeq + 256
     info.outPort = port
     info.inPort = socket.localPort
+    networkListeners[socket] = function(p)
+        if p.type == "control" and p.payload.destination == numberToIP(ip) then
+            socket.status = "error"
+            socket.error = p.error
+            return true
+        end
+        return false
+    end
     protocols.send.internet(info, ip, {
         PhoenixNetworking = true,
         type = "socket",
@@ -301,13 +310,17 @@ function protocols.send.socket.connect(info, ip, port, socket)
             windowSize = 0,
             reset = true
         })
-        error(err)
+        socket.status = "error"
+        socket.error = err
+        return false
     end
     socket.status = "syn-sent"
     socket.nextUpdate = os.epoch "utc" + 5000
     socket.process = info.process
     socket.retryCount = 0
-    openSockets[socket.localPort] = socket
+    openSockets[socket.localPort] = openSockets[socket.localPort] or {}
+    openSockets[socket.localPort][port] = socket
+    openSocketIDs[socket.id] = socket
 end
 
 function protocols.send.socket.data(info, message, socket)
@@ -386,15 +399,21 @@ local function socket_write(socket, data, ...)
     if select("#", ...) > 0 then return socket_write(socket, ...) end
 end
 
-function syscalls.__socketcall(process, thread, port, method, ...)
-    local socket = openSockets[port]
-    if not socket or socket.process ~= process then error("No such socket") end
+function syscalls.__socketcall(process, thread, id, method, ...)
+    local socket = openSocketIDs[id]
+    if not socket then error("No such socket") end
+    local realProcess = process
+    while process ~= socket.process do
+        if process == nil then error("No such socket") end
+        process = processes[process.parent or -1]
+    end
     if method == "close" then
         socket.sendSeqMax = socket.sendSeqNext
         protocols.send.socket.data({}, {final = true}, socket)
         socket.status = "fin-wait"
     elseif method == "read" then return socket_read(socket, ...)
     elseif method == "write" then return socket_write(socket, ...)
+    elseif method == "transfer" then socket.process = realProcess
     else error("No such method") end
 end
 
@@ -402,23 +421,30 @@ local do_syscall = do_syscall
 
 local function makePSPHandle(socket)
     local obj = setmetatable({id = socket.id}, {__name = "socket"})
+    function obj:localIP()
+        return socket.localIP
+    end
     function obj:status()
         if socket.status == "listening" or socket.status == "syn-sent" or socket.status == "syn-received" then return "connecting"
-        elseif socket.status == "connected" then return "connected"
+        elseif socket.status == "connected" or socket.buffer ~= "" then return "open"
         elseif socket.status == "error" then return "error", socket.error
         else return "closed" end
     end
     function obj:read(mode, ...)
-        if socket.status ~= "connected" then error("attempt to read from a " .. socket.status .. " handle", 2) end
-        return do_syscall("__socketcall", socket.localPort, "read", mode, ...)
+        if socket.status ~= "connected" and socket.status ~= "close-wait" and socket.status ~= "closed" then error("attempt to read from a " .. socket.status .. " handle", 2) end
+        return do_syscall("__socketcall", socket.id, "read", mode, ...)
     end
     function obj:write(data, ...)
         if socket.status ~= "connected" then error("attempt to write to a " .. socket.status .. " handle", 2) end
-        return do_syscall("__socketcall", socket.localPort, "write", data, ...)
+        return do_syscall("__socketcall", socket.id, "write", data, ...)
     end
     function obj:close()
+        if socket.status == "closing" or socket.status == "fin-wait" or socket.status == "closed" then return end
         if not (socket.status == "listening" or socket.status == "syn-sent" or socket.status == "syn-received" or socket.status == "connected") then error("attempt to close a " .. socket.status .. " handle", 2) end
-        return do_syscall("__socketcall", socket.localPort, "close")
+        return do_syscall("__socketcall", socket.id, "close")
+    end
+    function obj:transfer()
+        return do_syscall("__socketcall", socket.id, "transfer")
     end
     return obj
 end
@@ -462,6 +488,7 @@ end
 function protocols.recv.internet(info, message)
     info.sourceIP = ipToNumber(expect.field(message, "source", "string"))
     local dest = ipToNumber(expect.field(message, "destination", "string"))
+    info.localIP = dest
     syslog.debug("Received internet message from", message.source, "to", message.destination)
     expect.field(message, "payload", "table")
     if usedMessageIDs[expect.field(message, "messageID", "number", "string")] then return end
@@ -489,7 +516,7 @@ function protocols.recv.socket(info, message)
     expect.field(message, "windowSize", "number", "nil")
     expect.field(message, "payload", "string", "nil")
     if info.channel == 0 or info.replyChannel == 0 then syslog.debug("Received socket event on channel 0; discarding.") return end
-    local socket = openSockets[info.channel]
+    local socket = (openSockets[info.channel] or {})[info.replyChannel] or (openSockets[info.channel] or {}).listen
     if not socket then
         if message.acknowledgement then protocols.send.socket.reset(info, info.sourceIP, info.replyChannel, message.acknowledgement, nil, info.channel)
         else protocols.send.socket.reset(info, info.sourceIP, info.replyChannel, 0, message.sequence + (message.windowSize or 0), info.channel) end
@@ -508,15 +535,18 @@ function protocols.recv.socket(info, message)
         end
         if not message.synchronize then return end
         socket.ip = info.sourceIP
+        socket.localIP = numberToIP(info.localIP)
         socket.port = info.replyChannel
         socket.recvSeq = message.sequence + 1
         socket.recvSeqMax = socket.recvSeq + (message.windowSize or 0)
-        socket.sendSeq = math.floor(math.random()*0x1000000000000)
+        socket.sendSeq = math.floor(math.random()*0x10000000000)
         socket.sendSeqNext = socket.sendSeq + 2
         socket.sendSeqMax = socket.sendSeq + (message.windowSize or 0)
         socket.status = "syn-received"
         socket.nextUpdate = os.epoch "utc" + 5000
         socket.retryCount = 0
+        openSockets[info.channel][info.replyChannel] = socket
+        openSockets[info.channel].listen = nil
         protocols.send.internet({inPort = info.channel, outPort = info.replyChannel}, socket.ip, {
             PhoenixNetworking = true,
             type = "socket",
@@ -529,7 +559,7 @@ function protocols.recv.socket(info, message)
         if message.reset then
             socket.status = "error"
             socket.error = "Connection refused"
-            openSockets[info.channel] = nil
+            openSockets[info.channel][info.replyChannel] = nil
             if socket.process then socket.process.eventQueue[#socket.process.eventQueue+1] = {"handle_status_change", {id = socket.id, status = "error"}} end
             return true
         end
@@ -537,10 +567,11 @@ function protocols.recv.socket(info, message)
             protocols.send.socket.reset(info, info.sourceIP, info.replyChannel, message.acknowledgement, nil, info.channel)
             socket.status = "error"
             socket.error = "Connection refused"
-            openSockets[info.channel] = nil
+            openSockets[info.channel][info.replyChannel] = nil
             if socket.process then socket.process.eventQueue[#socket.process.eventQueue+1] = {"handle_status_change", {id = socket.id, status = "error"}} end
             return true
         end
+        socket.localIP = numberToIP(info.localIP)
         socket.status = "connected"
         socket.sendSeq = message.acknowledgement
         socket.sendSeqMax = socket.sendSeq + 256
@@ -557,7 +588,7 @@ function protocols.recv.socket(info, message)
             if message.reset then
                 socket.status = "error"
                 socket.error = "Connection reset by peer"
-                openSockets[info.channel] = nil
+                openSockets[info.channel][info.replyChannel] = nil
                 if socket.process then socket.process.eventQueue[#socket.process.eventQueue+1] = {"handle_status_change", {id = socket.id, status = "error"}} end
                 return true
             else
@@ -573,12 +604,12 @@ function protocols.recv.socket(info, message)
             elseif socket.status == "connected" or socket.status == "fin-wait" then
                 socket.status = "error"
                 socket.error = "Connection reset by peer"
-                openSockets[info.channel] = nil
+                openSockets[info.channel][info.replyChannel] = nil
                 if socket.process then socket.process.eventQueue[#socket.process.eventQueue+1] = {"handle_status_change", {id = socket.id, status = "error"}} end
                 return true
             else
                 socket.status = "closed"
-                openSockets[info.channel] = nil
+                openSockets[info.channel][info.replyChannel] = nil
                 if socket.process then socket.process.eventQueue[#socket.process.eventQueue+1] = {"handle_status_change", {id = socket.id, status = "closed"}} end
                 return true
             end
@@ -587,7 +618,7 @@ function protocols.recv.socket(info, message)
             protocols.send.socket.reset(info, info.sourceIP, info.replyChannel, message.acknowledgement, nil, info.channel)
             socket.status = "error"
             socket.error = "Connection reset by host"
-            openSockets[info.channel] = nil
+            openSockets[info.channel][info.replyChannel] = nil
             if socket.process then socket.process.eventQueue[#socket.process.eventQueue+1] = {"handle_status_change", {id = socket.id, status = "error"}} end
             return true
         end
@@ -598,13 +629,13 @@ function protocols.recv.socket(info, message)
                 socket.status = "connected"
                 socket.outQueue = {}
                 socket.nextUpdate = os.epoch "utc" + 2000
-                if socket.process then socket.process.eventQueue[#socket.process.eventQueue+1] = {"network_request", {uri = socket.uri, ip = info.sourceIP, handle = makePSPHandle(socket)}} end
+                if socket.process then socket.process.eventQueue[#socket.process.eventQueue+1] = {"network_request", {uri = socket.uri, ip = numberToIP(info.sourceIP), handle = makePSPHandle(socket)}} end
                 retval = true
             else
                 protocols.send.socket.reset(info, info.sourceIP, info.replyChannel, message.acknowledgement, nil, info.channel)
                 socket.status = "error"
                 socket.error = "Connection reset by host"
-                openSockets[info.channel] = nil
+                openSockets[info.channel][info.replyChannel] = nil
                 if socket.process then socket.process.eventQueue[#socket.process.eventQueue+1] = {"handle_status_change", {id = socket.id, status = "error"}} end
                 return true
             end
@@ -612,7 +643,7 @@ function protocols.recv.socket(info, message)
             if message.acknowledgement == socket.sendSeqMax then
                 syslog.debug("Socket closed")
                 socket.status = "closed"
-                openSockets[info.channel] = nil
+                openSockets[info.channel][info.replyChannel] = nil
                 if socket.process then socket.process.eventQueue[#socket.process.eventQueue+1] = {"handle_status_change", {id = socket.id, status = "closed"}} end
                 return true
             end
@@ -634,7 +665,7 @@ function protocols.recv.socket(info, message)
                         protocols.send.socket.reset(info, info.sourceIP, info.replyChannel, message.acknowledgement, nil, info.channel)
                         socket.status = "error"
                         socket.error = "Connection reset by host"
-                        openSockets[info.channel] = nil
+                        openSockets[info.channel][info.replyChannel] = nil
                         if socket.process then socket.process.eventQueue[#socket.process.eventQueue+1] = {"handle_status_change", {id = socket.id, status = "error"}} end
                         return true
                     end
@@ -653,7 +684,10 @@ function protocols.recv.socket(info, message)
                 socket.buffer = socket.buffer .. message.payload
                 socket.nextAck = true
                 socket.nextUpdate = os.epoch "utc" + 100
-                if socket.process then socket.process.eventQueue[#socket.process.eventQueue+1] = {"handle_data_ready", {id = socket.id}} end
+                if socket.process then
+                    syslog.debug("Sending data event to PID " .. socket.process.id)
+                    socket.process.eventQueue[#socket.process.eventQueue+1] = {"handle_data_ready", {id = socket.id}}
+                end
                 retval = true
             end
             socket.recvSeq = socket.recvSeq + 1
@@ -691,18 +725,18 @@ end
 local function socketUpdate()
     local time = os.epoch "utc"
     local event = false
-    for port, socket in pairs(openSockets) do if time >= socket.nextUpdate then
+    for port, list in pairs(openSockets) do for replyPort, socket in pairs(list) do if time >= socket.nextUpdate then
         if socket.status == "syn-sent" then
             socket.status = "error"
             socket.error = "Connection timed out (syn-sent)"
-            openSockets[port] = nil
+            openSockets[port][replyPort] = nil
             if socket.process then socket.process.eventQueue[#socket.process.eventQueue+1] = {"handle_status_change", {id = socket.id, status = "error"}} event = true end
         elseif socket.status == "syn-received" then
             socket.retryCount = socket.retryCount + 1
             if socket.retryCount > 3 then
                 socket.status = "error"
                 socket.error = "Connection timed out (syn-received)"
-                openSockets[port] = nil
+                openSockets[port][replyPort] = nil
                 if socket.process then socket.process.eventQueue[#socket.process.eventQueue+1] = {"handle_status_change", {id = socket.id, status = "error"}} event = true end
             else
                 -- TODO: resend syn+ack packet
@@ -729,9 +763,9 @@ local function socketUpdate()
         elseif socket.status == "time-wait" then
             syslog.debug("Time wait finished on port " .. port)
             socket.status = "closed"
-            openSockets[port] = nil
+            openSockets[port][replyPort] = nil
         end
-    end end
+    end end end
     return event
 end
 
@@ -756,6 +790,7 @@ eventHooks.timer = eventHooks.timer or {}
 eventHooks.timer[#eventHooks.timer+1] = function(ev)
     if ev[2] == socketTimer then
         socketTimer = os.startTimer(1)
+        --syslog.debug("Triggering socket timer")
         return socketUpdate()
     end
 end
@@ -1198,7 +1233,9 @@ function syscalls.listen(process, thread, uri)
             buffer = ""
         }
         nextHandleID = nextHandleID + 1
-        openSockets[URI.port] = socket
+        openSockets[URI.port] = openSockets[URI.port] or {}
+        openSockets[URI.port].listen = socket
+        openSocketIDs[socket.id] = socket
         return
     end
     error("Invalid protocol " .. URI.scheme)
@@ -1209,7 +1246,7 @@ function syscalls.unlisten(process, thread, uri)
 end
 
 function syscalls.ipconfig(process, thread, device, info)
-    if process.user ~= "root" then error("Permission denied") end
+    if info and process.user ~= "root" then error("Permission denied") end
     expect(1, device, "string")
     expect(2, info, "table", "nil")
     local node = checkModem(hardware.get(device))
@@ -1285,7 +1322,7 @@ function syscalls.routelist(process, thread, num)
             sourceNetmask = maskToPrefix(t.sourceNetmask),
             action = t.action,
             device = t.device and hardware.path(t.device),
-            destination = t.destination
+            destination = t.destination and numberToIP(t.destination)
         }
     end
     return retval
@@ -1316,6 +1353,7 @@ function syscalls.routeadd(process, thread, options)
     routes[options.table] = routes[options.table] or {}
     for _, v in ipairs(routes[options.table]) do if v.source == t.source and v.sourceNetmask == t.sourceNetmask then error("Route already exists") end end
     routes[options.table][#routes[options.table]+1] = t
+    routes.maxn = math.max(routes.maxn, options.table)
 end
 
 function syscalls.routedel(process, thread, source, mask, num)
@@ -1329,13 +1367,15 @@ function syscalls.routedel(process, thread, source, mask, num)
     if type(source) == "number" then source = bit32.band(source, mask)
     else source = bit32.band(ipToNumber(source), mask) end
     if not routes[num] then error("Route table does not exist") end
-    for i, v in ipairs(routes[num]) do if v.source == t.source and v.sourceNetmask == t.sourceNetmask then table.remove(routes[num], i) return end end
+    for i, v in ipairs(routes[num]) do if v.source == source and v.sourceNetmask == mask then table.remove(routes[num], i) return end end
 end
 
 function syscalls.arplist(process, thread, device)
     expect(1, device, "string")
     local node = checkModem(hardware.get(device))
-    return deepcopy(arptable[node.uuid] or {})
+    local retval = {}
+    for k, v in pairs(arptable[node.uuid] or {}) do retval[numberToIP(k)] = v end
+    return retval
 end
 
 function syscalls.arpset(process, thread, device, ip, id)

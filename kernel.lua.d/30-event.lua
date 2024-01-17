@@ -23,6 +23,24 @@ function syscalls.kill(process, thread, pid, signal)
     end
 end
 
+--- Sends a signal to a process from the kernel asynchronously.
+function killProcess(pid, signal)
+    expect(1, pid, "number")
+    expect(2, signal, "number")
+    local target = processes[pid]
+    if not target then return end
+    --syslog.debug("Sending signal", signal, "to PID", pid)
+    if signal == 9 then
+        reap_process(target)
+        if processes[target.parent] then syscalls.queueEvent(processes[target.parent], nil, "process_complete", {id = pid, result = 9}) end
+        processes[pid] = nil
+    elseif target.signalHandlers[signal] then
+        syscalls.newthread(target, nil, target.signalHandlers[signal], signal)
+    else
+        syscalls.queueEvent(target, nil, "signal", {signal = signal})
+    end
+end
+
 function syscalls.signal(process, thread, signal, handler)
     expect(1, signal, "number")
     expect(2, handler, "function", "nil")
@@ -114,29 +132,31 @@ do
     -- We're using some sneaky hacks here to be able to ensure the LUT is allocated as an array and not a hashmap
     -- Essentially, we load a pre-assembled function with the instructions `NEWTABLE 0 $maxkey 0; RETURN 0 2`
     -- This depends on the Lua version, so we implement it specially for each version detected
+    -- (Note: This no longer works as of CC:T 1.109, but we'll keep it here because it's cool.)
     local code
-    local template = string.dump(function() end)
-    local tabsize = (function(x)
-        if x < 8 then return x end
-        local e = 0
-        while x >= 128 do x, e = bit32.rshift(x + 0xf, 4), e + 4 end
-        while x >= 16 do x, e = bit32.rshift(x + 1, 1), e + 1 end
-        return bit32.bor((e + 1) * 8, x - 8)
-    end)(maxkey)
-    if _VERSION == "Lua 5.1" then code = template:sub(1, 12) .. ("I" .. template:byte(9) .. "IIBBBBIIIIIIII"):pack(0, 0, 0, 0, 0, 0, 1, 2, tabsize * 0x800000 + 10, 0x0100001E, 0, 0, 0, 0, 0)
-    elseif _VERSION == "Lua 5.2" then code = template:sub(1, 18) .. ("IIBBBIIIIIIIIII"):pack(0, 0, 0, 0, 1, 2, tabsize * 0x800000 + 11, 0x0100001F, 0, 0, 0, 0, 0, 0, 0)
-    elseif _VERSION == "Lua 5.3" then code = template:sub(1, 17 + ("jn"):packsize()) .. ("BBIIBBBIIIIIIIII"):pack(0, 0, 0, 0, 0, 0, 1, 2, tabsize * 0x800000 + 11, 0x01000026, 0, 0, 0, 0, 0, 0)
-    elseif _VERSION == "Lua 5.4" then code = template:sub(1, 15 + ("jn"):packsize()) .. ("BBBBBBBBIIIBBBBBBB"):pack(0, 0x80, 0x80, 0x80, 0, 0, 1, 0x83, 0x00000013, maxkey * 0x80 + 82, 0x00008048, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80) end
-    if code then
-        local fn, err = load(code, nil, "b")
-        if fn then keymap = fn() else syslog.debug("Could not load key table code:", err) end
+    local dump_ok, template = pcall(string.dump, function() end)
+    if dump_ok then
+        local tabsize = (function(x)
+            if x < 8 then return x end
+            local e = 0
+            while x >= 128 do x, e = bit32.rshift(x + 0xf, 4), e + 4 end
+            while x >= 16 do x, e = bit32.rshift(x + 1, 1), e + 1 end
+            return bit32.bor((e + 1) * 8, x - 8)
+        end)(maxkey)
+        syslog.debug("Key table sizes:", maxkey, tabsize)
+        if _VERSION == "Lua 5.1" then code = template:sub(1, 12) .. ("I" .. template:byte(9) .. "IIBBBBIIIIIIII"):pack(0, 0, 0, 0, 0, 0, 1, 2, tabsize * 0x800000 + 10, 0x0100001E, 0, 0, 0, 0, 0)
+        elseif _VERSION == "Lua 5.2" then code = template:sub(1, 18) .. ("IIBBBIIIIIIIIII"):pack(0, 0, 0, 0, 1, 2, tabsize * 0x800000 + 11, 0x0100001F, 0, 0, 0, 0, 0, 0, 0)
+        elseif _VERSION == "Lua 5.3" then code = template:sub(1, 17 + ("jn"):packsize()) .. ("BBIIBBBIIIIIIIII"):pack(0, 0, 0, 0, 0, 0, 1, 2, tabsize * 0x800000 + 11, 0x01000026, 0, 0, 0, 0, 0, 0)
+        elseif _VERSION == "Lua 5.4" then code = template:sub(1, 15 + ("jn"):packsize()) .. ("BBBBBBBBIIIBBBBBBB"):pack(0, 0x80, 0x80, 0x80, 0, 0, 1, 0x83, 0x00000013, maxkey * 0x80 + 82, 0x00008048, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80) end
+        if code then
+            local fn, err = load(code, nil, "b")
+            if fn then keymap = fn() else syslog.debug("Could not load key table code:", err) end
+        end
     end
     if not keymap then
-        -- Fall back on an O(log n) allocation method
+        -- Fall back on text Lua allocation method
         --- Stores a mapping of CraftOS keys to Phoenix keycodes.
-        keymap = {}
-        for i = 1, maxkey do keymap[i] = 0 end
-        for i = 1, maxkey do if not keys.getName(i) then keymap[i] = nil end end
+        keymap = load("return {" .. ("nil,"):rep(maxkey) .. "}")()
     end
     -- Letters, numpad numbers and function keys are easy
     for i = 0x61, 0x7A do keymap[keys[string.char(i)]] = i end

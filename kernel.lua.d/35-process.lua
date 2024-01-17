@@ -210,6 +210,12 @@ function syscalls.fork(process, thread, func, name, ...)
                 id = 0,
                 name = "<main thread>",
                 coro = coroutine.create(func),
+                syscall = coroutine.create(function(...)
+                    local args = table.pack(...)
+                    while true do
+                        args = table.pack(coroutine.yield(kSyscallComplete, xpcall(syscalls[args[1]], debug.traceback, table.unpack(args, 2, args.n))))
+                    end
+                end),
                 status = "starting",
                 args = table.pack(...),
                 filter = nil,
@@ -279,6 +285,12 @@ function syscalls.exec(process, thread, path, ...)
                 id = 0,
                 name = "<main thread>",
                 coro = coroutine.create(func),
+                syscall = coroutine.create(function(...)
+                    local args = table.pack(...)
+                    while true do
+                        args = table.pack(coroutine.yield(kSyscallComplete, xpcall(syscalls[args[1]], debug.traceback, table.unpack(args, 2, args.n))))
+                    end
+                end),
                 status = "starting",
                 args = table.pack(...),
                 filter = nil,
@@ -298,6 +310,12 @@ function syscalls.newthread(process, thread, func, ...)
         id = id,
         name = "<thread:" .. id .. ">",
         coro = coroutine.create(func),
+        syscall = coroutine.create(function(...)
+            local args = table.pack(...)
+            while true do
+                args = table.pack(coroutine.yield(kSyscallComplete, xpcall(syscalls[args[1]], debug.traceback, table.unpack(args, 2, args.n))))
+            end
+        end),
         status = "starting",
         args = table.pack(...),
         filter = nil,
@@ -311,7 +329,11 @@ end
 ---@param thread Thread
 function syscalls.exit(process, thread, code)
     -- TODO
-    for _, thread in pairs(process.threads) do thread.status = "dead" end
+    process.lastReturnValue = {pid = process.id, thread = thread.id, value = code, n = 1, code}
+    for _, thread in pairs(process.threads) do
+        thread.status = "dead"
+        thread.return_value = code
+    end
 end
 
 ---@param process Process

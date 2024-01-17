@@ -63,7 +63,7 @@ function syscalls.syslog(process, thread, options, ...)
     local message
     for i = 1, args.n do message = (i == 1 and "" or message .. " ") .. serialize(args[i]) end
     if log.file then
-        log.file.writeLine(("[%s]%s %s[%d%s]%s [%s]: %s"):format(
+        log.file.write(("[%s]%s %s[%d%s]%s [%s]: %s\n"):format(
             os.date("%b %d %X", options.time / 1000),
             options.category and " <" .. options.category .. ">" or "",
             processes[options.process] and processes[options.process].name or "(unknown)",
@@ -194,7 +194,7 @@ function syscalls.mklog(process, thread, name, streamed, path)
     expect(1, name, "string")
     expect(2, streamed, "boolean", "nil")
     expect(3, path, "string", "nil")
-    if syslogs[name] then error("Log already exists", 0) end
+    if syslogs[name] then return end
     syslogs[name] = {}
     if path then
         local err
@@ -295,6 +295,7 @@ function panic(message)
         end
         syslog.log({level = "panic"}, "We are hanging here...")
         term.setCursorBlink(false)
+        mainThread = nil
         while true do coroutine.yield() end
     end, function(m)
         oldpanic(message .. "; and an error occurred while logging the error: " .. m)

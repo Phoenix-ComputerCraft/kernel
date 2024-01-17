@@ -144,6 +144,15 @@ if bit then
     bit = nil
 end
 
+-- Check whether the _VERSION number is correct, and fix it if it's not
+if _VERSION == "Lua 5.1" and load("::a:: goto a") then
+    _VERSION = "Lua 5.2"
+    if load("return 1 >> 2 & 3") then
+        _VERSION = "Lua 5.3"
+        if load("local <const> a = 2") then _VERSION = "Lua 5.4" end
+    end
+end
+
 -- Implement miscellaneous Lua 5.2 functionality if on 5.1
 if _VERSION == "Lua 5.1" then
     if not table.pack then table.pack = function(...)
@@ -153,7 +162,7 @@ if _VERSION == "Lua 5.1" then
     end end
     if not table.unpack then table.unpack, unpack = unpack, nil end
 
-    local _, v = xpcall(function(m) return m end, nil, true)
+    local _, v = xpcall(function(m) return m end, function() end, true)
     if not v then
         local old_xpcall = xpcall
         xpcall = function(f, errh, ...)
@@ -761,6 +770,7 @@ function panic(message)
     term.setCursorPos(1, y)
     term.setTextColor(2)
     term.write("panic: We are hanging here...")
+    mainThread = nil
     while true do coroutine.yield() end
 end
 
@@ -809,9 +819,10 @@ local empty_packed_table = {n = 0}
 function executeThread(process, thread, ev, dead, allWaiting)
     local args
     if thread.status == "starting" then args = thread.args
-    elseif thread.status == "syscall" then args = thread.syscall_return
+    elseif thread.status == "syscall" then args = table.pack(table.unpack(thread.syscall_return, 3, thread.syscall_return.n))
     elseif thread.status == "preempt" then args = empty_packed_table
-    elseif thread.status == "suspended" then args = {ev[1], deepcopy(ev[2])} end
+    elseif thread.status == "suspended" then args = {ev[1], deepcopy(ev[2])}
+    elseif thread.status == "paused" then return false, allWaiting end
     if thread.status ~= "dead" and (not thread.filter or thread.filter(process, thread, ev)) then
         local old_dead = dead
         dead = false
@@ -822,7 +833,7 @@ function executeThread(process, thread, ev, dead, allWaiting)
             params = {n = thread.syscall_return.n, true, "syscall", thread.yielding, table.unpack(thread.syscall_return, 4, thread.syscall_return.n)}
             thread.yielding = nil
         else
-            --syslog.debug("Resuming thread", tid)
+            --syslog.debug("Resuming thread", process.id, thread.id)
             local old = globalMetatables
             globalMetatables = process.globalMetatables
             updateGlobalMetatables()
@@ -840,15 +851,19 @@ function executeThread(process, thread, ev, dead, allWaiting)
             allWaiting = false
             if params[3] and syscalls[params[3]] then
                 local start = procTime()
-                thread.syscall_return = table.pack(xpcall(syscalls[params[3]], debug.traceback, process, thread, table.unpack(params, 4, params.n)))
+                thread.syscall_return = table.pack(coroutine.resume(thread.syscall, params[3], process, thread, table.unpack(params, 4, params.n)))
                 process.systime = process.systime + (procTime() - start) / 1000
-                if not thread.syscall_return[1] and type(thread.syscall_return[2]) == "string" then
-                    syslog.log({level = "debug", category = "Syscall Failure", process = 0, module = params[3]}, thread.syscall_return[2])
-                    thread.syscall_return[2] = thread.syscall_return[2]:gsub("kernel:%d+: ", "")
-                end
-                if thread.syscall_return[2] == kSyscallYield then
-                    thread.yielding = thread.syscall_return[3]
-                    allWaiting = oldAllWaiting
+                if thread.syscall_return[2] == kSyscallComplete then
+                    if not thread.syscall_return[3] and type(thread.syscall_return[4]) == "string" then
+                        syslog.log({level = "debug", category = "Syscall Failure", process = 0, module = params[3]}, thread.syscall_return[4])
+                        thread.syscall_return[4] = thread.syscall_return[4]:gsub("kernel:%d+: ", "")
+                    end
+                    if thread.syscall_return[4] == kSyscallYield then
+                        thread.yielding = thread.syscall_return[5]
+                        allWaiting = oldAllWaiting
+                    end
+                else
+                    thread.yielding = params[3]
                 end
             else thread.syscall_return = {false, "No such syscall", n = 2} end
         elseif params[2] == "preempt" then
@@ -876,6 +891,9 @@ function executeThread(process, thread, ev, dead, allWaiting)
     return dead, allWaiting
 end
 
+--- The main coroutine for the computer.
+mainThread = coroutine.running()
+
 --- Executes a function in user mode from kernel code.
 -- @tparam Process process The process to execute as
 -- @tparam function func The function to execute
@@ -883,20 +901,14 @@ end
 -- @treturn boolean Whether the function returned successfully
 -- @treturn any The value that the function returned.
 function userModeCallback(process, func, ...)
-    local thread = {
-        id = -1,
-        name = "<user mode callback>",
-        coro = coroutine.create(func),
-        status = "starting",
-        args = table.pack(...),
-        filter = nil,
-    }
-    pcall(setfenv, func, process.env)
-    local dead = false
-    while not dead do
-        dead = executeThread(process, thread, empty_packed_table, true, false)
-        if thread.status == "suspended" then return false, "attempt to yield from a user mode callback" end
+    local id = syscalls.newthread(process, nil, func, ...)
+    local thread = process.threads[id]
+    while thread.status ~= "dead" do
+        --syslog.log({level = "debug", process = process.id, thread = id}, debug.traceback("Waiting on user mode callback"))
+        if coroutine.running() == mainThread then error("userModeCallback not called from a yieldable context", 2) end
+        coroutine.yield()
     end
+    syslog.log({level = "debug", process = process.id, thread = id}, "Usermode callback completed")
     return not thread.did_error, thread.return_value
 end
 
@@ -941,6 +953,7 @@ for _,v in ipairs({...}) do
         elseif type(args[key]) == "number" then args[key] = tonumber(value)
         else args[key] = value end
     elseif key == "silent" then args.loglevel = 5
+    elseif key == "quiet" then args.loglevel = 3
     end
 end
 
@@ -1058,6 +1071,12 @@ do
         else return superprotected[v or ""] or v end
     end
 
+    local function checkint32(n)
+        n = bit32.band(tonumber(n), 0xFFFFFFFF)
+        if bit32.btest(n, 0x80000000) then n = n - 0x100000000 end
+        return n
+    end
+
     function debug.getinfo(thread, func, what)
         if type(thread) ~= "thread" then what, func, thread = func, thread, running() end
         local retval
@@ -1113,7 +1132,7 @@ do
     function _G.getfenv(f)
         local v
         if f == nil then v = n_getfenv(2)
-        elseif tonumber(f) and tonumber(f) > 0 then
+        elseif tonumber(f) and checkint32(f) > 0 then
             local info = getinfo(f + 1, "f")
             local caller = getinfo(2, "f")
             if info and protectedObjects[info.func] and not (caller and protectedObjects[info.func][caller.func]) then return nil end
@@ -1127,7 +1146,7 @@ do
     end
 
     function _G.setfenv(f, tab)
-        if tonumber(f) then
+        if tonumber(f) and checkint32(f) > 0 then
             local info = getinfo(f + 1, "f")
             local caller = getinfo(2, "f")
             if info and protectedObjects[info.func] and not (caller and protectedObjects[info.func][caller.func]) then error("attempt to set environment of protected function", 2) end
@@ -1176,10 +1195,6 @@ do
     end
 
     superprotected = {
-        [n_getfenv] = _G.getfenv,
-        [n_setfenv] = _G.setfenv,
-        [d_getfenv] = debug.getfenv,
-        [d_setfenv] = debug.setfenv,
         [getlocal] = debug.getlocal,
         [setlocal] = debug.setlocal,
         [getupvalue] = debug.getupvalue,
@@ -1188,6 +1203,10 @@ do
         [superprotect] = function() end,
     }
     if debug.upvaluejoin then superprotected[upvaluejoin] = debug.upvaluejoin end
+    if debug.getfenv then superprotected[d_getfenv] = debug.getfenv end
+    if debug.setfenv then superprotected[d_setfenv] = debug.setfenv end
+    if _G.getfenv then superprotected[n_getfenv] = _G.getfenv end
+    if _G.setfenv then superprotected[n_setfenv] = _G.setfenv end
 
     protectedObjects = keys(setmetatable({}, {__mode = "k"}),
         getfenv,

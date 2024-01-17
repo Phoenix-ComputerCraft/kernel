@@ -120,9 +120,9 @@ eventHooks.key[#eventHooks.key+1] = function(ev)
     elseif ev[2] == keys.leftAlt or ev[2] == keys.rightAlt then keysHeld.alt = true
     elseif ev[2] == keys.leftShift or ev[2] == keys.rightShift then keysHeld.shift = true end
     if not currentTTY.flags.raw and currentTTY.frontmostProcess and keysHeld.ctrl and not keysHeld.alt and not keysHeld.shift then
-        if ev[2] == keys.c then syscalls.kill(KERNEL, nil, currentTTY.frontmostProcess.id, 2) terminal.write(currentTTY, "^C")
-        elseif ev[2] == keys.backslash then syscalls.kill(KERNEL, nil, currentTTY.frontmostProcess.id, 3) terminal.write(currentTTY, "^\\")
-        elseif ev[2] == keys.z then syscalls.kill(KERNEL, nil, currentTTY.frontmostProcess.id, 19) terminal.write(currentTTY, "^Z")
+        if ev[2] == keys.c then killProcess(currentTTY.frontmostProcess.id, 2) terminal.write(currentTTY, "^C")
+        elseif ev[2] == keys.backslash then killProcess(currentTTY.frontmostProcess.id, 3) terminal.write(currentTTY, "^\\")
+        elseif ev[2] == keys.z then killProcess(currentTTY.frontmostProcess.id, 19) terminal.write(currentTTY, "^Z")
         elseif ev[2] == keys.d then currentTTY.eof = true terminal.write(currentTTY, "^D")
         -- TODO: fill in other cool keys
         end
@@ -622,7 +622,7 @@ function terminal.write(tty, text)
                 else tty.cursor.x = tty.cursor.x - 1 end
             elseif c == '\t' then
                 commit(n)
-                tty.cursor.x = math.floor(tty.cursor.x / 8) * 8 + 8
+                tty.cursor.x = math.floor((tty.cursor.x - 1) / 8) * 8 + 9
                 if tty.cursor.x > tty.size.width then
                     tty.cursor.x = 1
                     nextline(tty)
@@ -830,10 +830,10 @@ end
 function syscalls.termctl(process, thread, flags)
     expect(1, flags, "table", "nil")
     if not process.stdout or not process.stdout.isTTY then return nil end
-    if process ~= process.stdout.frontmostProcess then
+    --[[if process ~= process.stdout.frontmostProcess then
         syscalls.kill(KERNEL, nil, process.id, 22)
         if process.paused then return kSyscallYield, "termctl", flags end
-    end
+    end]]
     if flags then
         expect.field(flags, "cbreak", "boolean", "nil")
         expect.field(flags, "delay", "boolean", "nil")
@@ -849,7 +849,10 @@ function syscalls.termctl(process, thread, flags)
 end
 
 function terminal.openterm(tty, process)
-    if tty.isLocked then return nil, "Terminal already in use" end
+    if tty.isLocked then
+        if not tty.isGraphics and tty.frontmostProcess == process then return tty.screenHandle end
+        return nil, "Terminal already in use"
+    end
     local size = tty.size
     local buffer = {
         cursor = {x = 1, y = 1},
@@ -877,12 +880,14 @@ function terminal.openterm(tty, process)
     local win = setmetatable({}, {__name = "Terminal"})
     local redraw = terminal.redraw
     local expect = expect
+    tty.screenHandle = win
 
     function win.close()
         if not win then error("terminal is already closed", 2) end
         win = nil
         tty.isLocked = false
         tty.frontmostProcess = table.remove(tty.processList)
+        tty.screenHandle = nil
         redraw(tty, true)
     end
 
@@ -1084,7 +1089,10 @@ end
 
 function terminal.opengfx(tty, process)
     if not term.drawPixels then return nil, "Graphics mode not supported" end
-    if tty.isLocked then return nil, "Terminal already in use" end
+    if tty.isLocked then
+        if tty.isGraphics and tty.frontmostProcess == process then return tty.screenHandle end
+        return nil, "Terminal already in use"
+    end
     local size = tty.size
     local buffer = {
         palette = {},
@@ -1111,12 +1119,14 @@ function terminal.opengfx(tty, process)
     local win = setmetatable({}, {__name = "GFXTerminal"})
     local redraw = terminal.redraw
     local expect = expect
+    tty.screenHandle = win
 
     function win.close()
         if not win then error("terminal is already closed", 2) end
         win = nil
         tty.isLocked = false
         tty.frontmostProcess = table.remove(tty.processList)
+        tty.screenHandle = nil
         redraw(tty, true)
     end
 

@@ -1,11 +1,11 @@
--- Phoenix Kernel v0.0.4
+-- Phoenix Kernel v0.0.5
 --
--- Copyright (c) 2021-2023 JackMacWindows. All rights reserved.
+-- Copyright (c) 2021-2024 JackMacWindows. All rights reserved.
 -- This is a PRE-RELEASE BUILD! Redistribution of this file is not permitted.
 -- See the Phoenix EULA (https://github.com/Phoenix-ComputerCraft/kernel/blob/master/LICENSE.md) for more information.
 
 --- Version number of Phoenix.
-PHOENIX_VERSION = "0.0.4"
+PHOENIX_VERSION = "0.0.5"
 --- Build string of Phoenix.
 PHOENIX_BUILD = "PRERELEASE NONFREE $BUILD_DATE$"
 
@@ -54,6 +54,7 @@ shutdownHooks = {}
 
 -- Unique keys for certain internal uses.
 kSyscallYield = {}
+kSyscallComplete = {}
 
 --- Process API
 process = {}
@@ -74,8 +75,8 @@ if discord then discord("Phoenix", "Booting Phoenix " .. PHOENIX_VERSION) end
 
 for _, v in ipairs(fs.list(fs.combine(args.root, args.splitkernpath))) do
     local file, err = fs.open(fs.combine(args.root, args.splitkernpath, v), "rb")
-    if not file then panic("Could not read kernel part " .. v .. ": " .. err) end
-    local fn, err = (loadstring or load)(file.readAll(), "=kernel:" .. v)
+    if not file then (panic or error)("Could not read kernel part " .. v .. ": " .. err) end
+    local fn, err = (loadstring or load)(file.readAll(), "=kernel:" .. v, "t", _ENV)
     file.close()
     if not fn then (panic or error)("Could not load kernel part " .. v .. ": " .. err) end
     fn(...)

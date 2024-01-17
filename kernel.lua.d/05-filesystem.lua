@@ -80,7 +80,8 @@ filesystems = {
             },
             contents = {}
         },
-        metapath = "/meta.ltn"
+        metapath = "/meta.ltn",
+        lastDispatch = 0
     },
     tmpfs = {},
     drivefs = {},
@@ -426,6 +427,16 @@ do
     local file = fs.open("/meta.ltn", "r")
     if file then
         filesystems.craftos.meta = unserialize(file.readAll()) or filesystems.craftos.meta
+        filesystems.craftos.lastDispatch = os.epoch "utc"
+        file.close()
+    end
+end
+
+shutdownHooks[#shutdownHooks+1] = function()
+    syslog.log("Syncing filesystem")
+    local file = fs.open(filesystems.craftos.metapath, "w")
+    if file then
+        file.write(serialize(filesystems.craftos.meta, {compact = true}))
         file.close()
     end
 end
@@ -510,9 +521,12 @@ function filesystems.craftos:setmeta(user, path, meta, nolink)
         }
         if meta.type ~= "directory" then t.contents = nil end
     else stack[#stack].contents[name] = nil end
-    local file = assert(fs.open(self.metapath, "w"))
-    file.write(serialize(self.meta, {compact = true}))
-    file.close()
+    if os.epoch "utc" - self.lastDispatch > 1000 then
+        local file = assert(fs.open(self.metapath, "w"))
+        file.write(serialize(self.meta, {compact = true}))
+        file.close()
+        self.lastDispatch = os.epoch "utc"
+    end
 end
 
 function filesystems.craftos:new(process, path, options)
@@ -604,7 +618,7 @@ function filesystems.craftos:stat(process, path, nolink)
     attr.isDir = nil
     if not attr.modified then attr.modified = attr.modification end
     attr.modification = nil
-    attr.capacity = fs.getCapacity(p)
+    attr.capacity = fs.getCapacity(p) or 0
     attr.freeSpace = fs.getFreeSpace(p)
     local ro = attr.isReadOnly
     attr.isReadOnly = nil
@@ -678,17 +692,19 @@ function filesystems.craftos:mkdir(process, path)
         else error(path .. ": File already exists", 2) end
     end
     local parts = split(path, "/\\")
-    local i = #parts - 1
+    local i = #parts
     repeat
+        i=i-1
         stat = self:stat(process, table.concat(parts, "/", 1, i))
         if stat then
             if stat.type == "directory" then break
             else error(path .. ": File already exists", 2) end
         end
-        i=i-1
     until stat or i <= 0
-    if path:match "^/" then stat = assert(self:stat(process, "/"))
-    else stat = assert(self:stat(process, process.dir)) end
+    if not stat then
+        if path:match "^/" then stat = assert(self:stat(process, "/"))
+        else stat = assert(filesystem.stat(process, process.dir)) end
+    end
     if process.user ~= "root" then
         local perms = stat.permissions[process.user] or stat.worldPermissions
         if not perms.write then error(path .. ": Permission denied", 2) end
@@ -706,7 +722,7 @@ function filesystems.craftos:mkdir(process, path)
     end
     i=i+1
     while i <= #parts do
-        self:setmeta(process.user, fs.combine(self.path, table.concat(parts, 1, i)), deepcopy(meta))
+        self:setmeta(process.user, fs.combine(self.path, table.concat(parts, "/", 1, i)), deepcopy(meta))
         i=i+1
     end
     fs.makeDir(fs.combine(self.path, path))
@@ -715,7 +731,7 @@ end
 function filesystems.craftos:link(process, path, location)
     local stat = self:stat(process, path)
     if stat then error(path .. ": File exists", 2) end
-    self:open(process, path, "w").close()
+    assert(self:open(process, path, "w")).close()
     local meta = self:getmeta(process.user, fs.combine(self.path, path), true)
     meta.type, meta.link = "link", location
     self:setmeta(process.user, fs.combine(self.path, path), meta, true)
@@ -724,7 +740,7 @@ end
 function filesystems.craftos:mkfifo(process, path)
     local stat = self:stat(process, path)
     if stat then error(path .. ": File exists", 2) end
-    self:open(process, path, "w").close()
+    assert(self:open(process, path, "w")).close()
     local meta = self:getmeta(process.user, fs.combine(self.path, path), true)
     meta.type = "fifo"
     self:setmeta(process.user, fs.combine(self.path, path), meta, true)
@@ -1459,6 +1475,8 @@ function filesystem.link(process, path, location)
     expect(0, process, "table")
     expect(1, path, "string")
     expect(2, location, "string")
+    if fs.combine(path) == fs.combine(location) then error("Cannot link file to itself", 2) end
+    syslog.debug("Creating link", path, " => ", location)
     repeat
         local mount, p = getMount(process, path)
         if not mount.link then error("Filesystem does not support links", 2) end
@@ -1587,6 +1605,7 @@ function filesystem.unmount(process, path)
     local stat = mounts[path]:stat(process, "")
     if not stat then error("Internal error in unmount: could not get stat for root! Please report this to the maintainer of the target filesystem.", 2)
     elseif process.user ~= "root" and not (stat.permissions[process.user] or stat.worldPermissions).write then error(path .. ": Permission denied", 2) end
+    if mounts[path].unmount then mounts[path]:unmount(process) end
     mounts[path] = nil
 end
 

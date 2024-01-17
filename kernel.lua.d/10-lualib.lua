@@ -81,32 +81,34 @@ function createLuaLib(process)
 
     function G.dofile(path)
         if path ~= nil and type(path) ~= "string" then error("bad argument #1 (expected string, got " .. type(path) .. ")", 2) end
-        local fn, err = loadfile(path or io.stdin:read("*a"), nil, _G)
+        local fn, err = loadfile(path or io.stdin:read("*a"))
         if not fn then error(err, 2) end
         return fn()
     end
 
-    local load, getfenv, setfenv, make_ENV = load, getfenv, setfenv, make_ENV
-    if _VERSION == "Lua 5.1" then
-        function G.load(chunk, name, mode, env)
-            -- Shadow environment table to add proper _ENV support
-            -- TODO: Figure out if this could break anything
-            return load(chunk, name, mode, make_ENV(env or process.env))
-        end
-        function G.getfenv(f)
-            local v
-            if f == nil then v = getfenv(2)
-            elseif tonumber(f) and tonumber(f) > 0 then v = getfenv(f+1)
-            elseif type(f) == "function" then v = getfenv(f)
-            else v = getfenv(f) end
-            local mt = getmetatable(f)
-            if mt and mt.__env then return mt.__env
-            else return v end
-        end
-        function G.setfenv(f, e)
-            return setfenv(f, make_ENV(e))
-        end
-    else G.load, G.getfenv, G.setfenv = function(chunk, name, mode, env) return load(chunk, name, mode, env or process.env) end, getfenv, setfenv end
+    do
+        local load, getfenv, setfenv, make_ENV = load, getfenv, setfenv, make_ENV
+        if _VERSION == "Lua 5.1" then
+            function G.load(chunk, name, mode, env)
+                -- Shadow environment table to add proper _ENV support
+                -- TODO: Figure out if this could break anything
+                return load(chunk, name, mode, make_ENV(env or process.env))
+            end
+            function G.getfenv(f)
+                local v
+                if f == nil then v = getfenv(2)
+                elseif tonumber(f) and tonumber(f) > 0 then v = getfenv(f+1)
+                elseif type(f) == "function" then v = getfenv(f)
+                else v = getfenv(f) end
+                local mt = getmetatable(f)
+                if mt and mt.__env then return mt.__env
+                else return v end
+            end
+            function G.setfenv(f, e)
+                return setfenv(f, make_ENV(e))
+            end
+        else G.load, G.getfenv, G.setfenv = function(chunk, name, mode, env) return load(chunk, name, mode, env or process.env) end, getfenv, setfenv end
+    end
 
     function G.loadfile(path, mode, env)
         if env == nil and type(mode) == "table" then env, mode = mode, nil end
@@ -301,6 +303,7 @@ function createLuaLib(process)
         end,
         open = function(filename, mode)
             if type(filename) ~= "string" then error("bad argument #1 (expected string, got " .. type(filename) .. ")", 2) end
+            if mode == nil then mode = "r" end
             if type(mode) ~= "string" then error("bad argument #2 (expected string, got " .. type(mode) .. ")", 2) end
             local file, err = do_syscall("open", filename, mode)
             if not file then return nil, err
@@ -526,4 +529,32 @@ function createLuaLib(process)
         end
     end
     return G
+end
+
+-- Copies of standard library functions for the kernel
+
+function loadfile(path, mode, env)
+    if env == nil and type(mode) == "table" then env, mode = mode, nil end
+    if type(path) ~= "string" then error("bad argument #1 (expected string, got " .. type(path) .. ")", 2) end
+    if mode ~= nil and type(mode) ~= "string" then error("bad argument #2 (expected string, got " .. type(mode) .. ")", 2) end
+    if env ~= nil and type(env) ~= "table" then error("bad argument #3 (expected table, got " .. type(env) .. ")", 2) end
+    local file, err = filesystem.open(KERNEL, path, "rb")
+    if not file then error(err, 2) end
+    local data = file.readAll()
+    file.close()
+    return load(data, "@" .. path, mode, env)
+end
+
+function dofile(path)
+    if path ~= nil and type(path) ~= "string" then error("bad argument #1 (expected string, got " .. type(path) .. ")", 2) end
+    local fn, err = loadfile(path or io.stdin:read("*a"))
+    if not fn then error(err, 2) end
+    return fn()
+end
+
+function print(...)
+    for i = 1, select("#", ...) do
+        local v = tostring(select(i, ...))
+        terminal.write(TTY[1], v)
+    end
 end

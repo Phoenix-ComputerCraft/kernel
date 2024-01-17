@@ -111,7 +111,7 @@ local function killall()
     syslog.log("Sending SIGTERM to all processes")
     local living = false
     for pid, process in pairs(processes) do if pid ~= 0 then
-        syscalls.kill(KERNEL, nil, pid, 15)
+        killProcess(pid, 15)
         local gotev, ev = false, nil
         local dead = true
         for tid, thread in pairs(process.threads) do
@@ -134,7 +134,7 @@ local function killall()
     terminal.redraw(currentTTY)
     if living then
         syslog.log("Sending SIGKILL to all processes")
-        for pid in pairs(processes) do if pid ~= 0 then syscalls.kill(KERNEL, nil, pid, 9) end end
+        for pid in pairs(processes) do if pid ~= 0 then killProcess(pid, 9) end end
     end
 end
 
@@ -171,6 +171,7 @@ function drivers.root.methods:shutdown(process)
         syslog.log("Halting system")
         for _, v in ipairs(shutdownHooks) do v() end
         os.shutdown()
+        mainThread = nil
         while true do coroutine.yield() end
     end
     killall()
@@ -184,6 +185,7 @@ function drivers.root.methods:reboot(process)
         syslog.log("Rebooting system")
         for _, v in ipairs(shutdownHooks) do v() end
         os.reboot()
+        mainThread = nil
         while true do coroutine.yield() end
     end
     killall()
@@ -916,7 +918,7 @@ eventHooks.modem_message[#eventHooks.modem_message+1] = function(ev)
         return
     end
     local retval = false
-    for v in pairs(node.listeners) do if node.internalState.modem[ev[3]][v] then v.eventQueue[#v.eventQueue+1], retval = {"modem_message", {device = hardware.path(node), channel = ev[3], replyChannel = ev[4], message = ev[5], distance = ev[6]}}, true end end
+    for v in pairs(node.listeners) do if (node.internalState.modem[ev[3]] or {})[v] then v.eventQueue[#v.eventQueue+1], retval = {"modem_message", {device = hardware.path(node), channel = ev[3], replyChannel = ev[4], message = ev[5], distance = ev[6]}}, true end end
     return retval
 end
 

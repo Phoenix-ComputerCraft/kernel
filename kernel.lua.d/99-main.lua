@@ -23,6 +23,13 @@ end
 syslog.log("Starting init from " .. processes[init_pid].name)
 local allWaiting = false
 
+local yield = coroutine.yield
+function coroutine.yield(...)
+    if coroutine.running() == mainThread then error("attempt to yield from kernel main thread", 2) end
+    return yield(...)
+end
+debug.protect(coroutine.yield)
+
 -- Basic built-in debugger for testing
 -- TODO: Improve this A LOT!
 eventHooks.key = eventHooks.key or {}
@@ -40,7 +47,7 @@ eventHooks.key[#eventHooks.key+1] = function(ev)
             term.write("lua> ")
             term.setCursorBlink(true)
             while true do
-                local ev = {coroutine.yield()}
+                local ev = {yield()}
                 if ev[1] == "char" or ev[1] == "paste" then
                     line = line .. ev[2]
                     term.write(ev[2])
@@ -110,7 +117,7 @@ local ok, err = xpcall(function()
 while processes[init_pid] do
     if not allWaiting then os.queueEvent("__event_queue_back") end
     while true do
-        local ev = table.pack(coroutine.yield())
+        local ev = table.pack(yield())
         local name = ev[1]
         if name == "__event_queue_back" then break end
         local pushedEvent = false
@@ -156,11 +163,13 @@ while processes[init_pid] do
         end
         if dead then
             process.isDead = true
-            if pid == init_pid then
-                init_retval = process.lastReturnValue.value or process.lastReturnValue.error
-            elseif processes[process.parent] then
-                process.lastReturnValue.id = pid
-                processes[process.parent].eventQueue[#processes[process.parent].eventQueue+1] = {"process_complete", process.lastReturnValue}
+            if process.lastReturnValue then
+                if pid == init_pid then
+                    init_retval = process.lastReturnValue.value or process.lastReturnValue.error
+                elseif processes[process.parent] then
+                    process.lastReturnValue.id = pid
+                    processes[process.parent].eventQueue[#processes[process.parent].eventQueue+1] = {"process_complete", process.lastReturnValue}
+                end
             end
             reap_process(process)
             processes[pid] = nil
