@@ -196,6 +196,7 @@ end
 
 -- Add string.pack if it's not present
 if not string.pack then
+    local expect = expect.expect
     local ByteOrder = {BIG_ENDIAN = 1, LITTLE_ENDIAN = 2}
     local isint = {b = 1, B = 1, h = 1, H = 1, l = 1, L = 1, j = 1, J = 1, T = 1}
     local packoptsize_tbl = {b = 1, B = 1, x = 1, h = 2, H = 2, f = 4, j = 4, J = 4, l = 8, L = 8, T = 8, d = 8, n = 8}
@@ -821,7 +822,7 @@ function executeThread(process, thread, ev, dead, allWaiting)
     if thread.status == "starting" then args = thread.args
     elseif thread.status == "syscall" then args = table.pack(table.unpack(thread.syscall_return, 3, thread.syscall_return.n))
     elseif thread.status == "preempt" then args = empty_packed_table
-    elseif thread.status == "suspended" then args = {ev[1], deepcopy(ev[2])}
+    elseif thread.status == "suspended" then args = {ev[1], {}} for k, v in pairs(ev[2]) do args[2][k] = v end
     elseif thread.status == "paused" then return false, allWaiting end
     if thread.status ~= "dead" and (not thread.filter or thread.filter(process, thread, ev)) then
         local old_dead = dead
@@ -844,6 +845,8 @@ function executeThread(process, thread, ev, dead, allWaiting)
             globalMetatables = old
             updateGlobalMetatables()
         end
+        if params[2] == "secure_syscall" then params[2] = "syscall"
+        elseif params[2] == "secure_event" then params[2] = nil end
         if params[2] == "syscall" then
             --syslog.debug("Calling syscall", params[3])
             thread.status = "syscall"

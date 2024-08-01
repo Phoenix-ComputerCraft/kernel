@@ -127,16 +127,16 @@ eventHooks.key[#eventHooks.key+1] = function(ev)
         -- TODO: fill in other cool keys
         end
     end
-    if keysHeld.ctrl and keysHeld.alt and not keysHeld.shift then
+    if keysHeld.ctrl and not keysHeld.alt and keysHeld.shift then
         local changed = true
-        if ev[2] == keys.one then currentTTY = TTY[1]
-        elseif ev[2] == keys.two then currentTTY = TTY[2]
-        elseif ev[2] == keys.three then currentTTY = TTY[3]
-        elseif ev[2] == keys.four then currentTTY = TTY[4]
-        elseif ev[2] == keys.five then currentTTY = TTY[5]
-        elseif ev[2] == keys.six then currentTTY = TTY[6]
-        elseif ev[2] == keys.seven then currentTTY = TTY[7]
-        elseif ev[2] == keys.eight then currentTTY = TTY[8]
+        if ev[2] == keys.f1 then currentTTY = TTY[1]
+        elseif ev[2] == keys.f2 then currentTTY = TTY[2]
+        elseif ev[2] == keys.f3 then currentTTY = TTY[3]
+        elseif ev[2] == keys.f4 then currentTTY = TTY[4]
+        elseif ev[2] == keys.f5 then currentTTY = TTY[5]
+        elseif ev[2] == keys.f6 then currentTTY = TTY[6]
+        elseif ev[2] == keys.f7 then currentTTY = TTY[7]
+        elseif ev[2] == keys.f8 then currentTTY = TTY[8]
         elseif ev[2] == keys.left then for i = 1, 8 do if currentTTY == TTY[i] then currentTTY = TTY[(i+7)%8] break end end
         elseif ev[2] == keys.right then for i = 1, 8 do if currentTTY == TTY[i] then currentTTY = TTY[(i+1)%8] break end end
         else changed = false end
@@ -208,6 +208,7 @@ function terminal.redraw(tty, full)
     end
     term.setCursorPos(buffer.cursor.x, buffer.cursor.y)
     term.setCursorBlink(buffer.cursorBlink)
+    term.setTextColor(2^tonumber(buffer.colors.fg, 16))
     buffer.dirtyLines, buffer.dirtyPalette = {}, {}
 end
 
@@ -1060,7 +1061,14 @@ function terminal.openterm(tty, process)
         if not win then error("terminal is already closed", 2) end
         expect(1, y, "number")
         local l = buffer[y]
-        return l and table.unpack(l, 1, 3)
+        if l then return table.unpack(l, 1, 3) end
+    end
+
+    local nativePaletteColor = term.nativePaletteColor
+    function win.nativePaletteColor(color)
+        expect(1, color, "number")
+        expect.range(color, 0, 15)
+        return nativePaletteColor(2^color)
     end
 
     for _, v in pairs(win) do setfenv(v, process.env) debug.protect(v) end
@@ -1071,6 +1079,7 @@ function terminal.openterm(tty, process)
     win.setBackgroundColour = win.setBackgroundColor
     win.getPaletteColour = win.getPaletteColor
     win.setPaletteColour = win.setPaletteColor
+    win.nativePaletteColour = win.nativePaletteColor
     process.dependents[#process.dependents+1] = {gc = function() if win then return win.close() end end}
     redraw(tty, true)
     return win
@@ -1264,9 +1273,17 @@ function terminal.opengfx(tty, process)
         --if not buffer.frozen then redraw(tty) end
     end
 
+    local nativePaletteColor = term.nativePaletteColor
+    function win.nativePaletteColor(color)
+        expect(1, color, "number")
+        expect.range(color, 0, 15)
+        return nativePaletteColor(2^color)
+    end
+
     for _, v in pairs(win) do setfenv(v, process.env) debug.protect(v) end
     win.getPaletteColour = win.getPaletteColor
     win.setPaletteColour = win.setPaletteColor
+    win.nativePaletteColour = win.nativePaletteColor
     process.dependents[#process.dependents+1] = {gc = function() if win then return win.close() end end}
     redraw(tty, true)
     return win
@@ -1289,19 +1306,106 @@ function syscalls.mktty(process, thread, width, height)
     local tty = terminal.makeTTY(term, width, height)
     tty.id = math.random(0, 0x7FFFFFFF)
     tty.process = process
-    local retval = setmetatable({}, {__index = tty, __metatable = {}})
+    local mt = {__index = tty, __metatable = {__name = "TTY"}}
+    local retval = setmetatable({}, mt)
+    local do_syscall = do_syscall
+    function retval.sendEvent(event, param)
+        return do_syscall("__ttyevent", retval, event, param)
+    end
+    function retval.write(text)
+        tty.buffer = tty.buffer .. tostring(text)
+        return do_syscall("__ttyevent", retval, "paste", tostring(text))
+    end
+    debug.protect(retval.sendEvent)
+    debug.protect(retval.write)
+    mt.__newindex = function() error("cannot modify TTY", 2) end
     terminal.userTTYs[retval] = tty
     process.dependents[#process.dependents+1] = {gc = function() terminal.userTTYs[retval] = nil end}
     return retval
 end
 
+function syscalls.__ttyevent(process, thread, usertty, event, param)
+    expect(1, usertty, "table")
+    expect(2, event, "string")
+    expect(3, param, "table")
+    local tty = terminal.userTTYs[usertty]
+    if not tty then error("Invalid TTY") end
+    if tty.process ~= process then error("Invalid TTY") end
+    syslog.debug("TTY event", event, tostring(tty.frontmostProcess))
+    if not tty.frontmostProcess then return end
+    syslog.debug(tostring(tty), tostring(tty.frontmostProcess.stdin), tostring(tty.frontmostProcess.stdout), tostring(tty.frontmostProcess.stderr))
+    if event == "key" then
+        expect.field(param, "keycode", "number")
+        expect.field(param, "isRepeat", "boolean")
+        -- TODO: fix held keys
+        tty.frontmostProcess.eventQueue[#tty.frontmostProcess.eventQueue+1] = {"key", {keycode = param.keycode, isRepeat = param.isRepeat, ctrlHeld = keysHeld.ctrl, altHeld = keysHeld.alt, shiftHeld = keysHeld.shift}}
+        if not tty.isLocked then
+            if param.keycode == 10 then
+                if tty.flags.cbreak then
+                    tty.buffer = tty.buffer .. "\n"
+                else
+                    tty.buffer = tty.buffer .. tty.preBuffer .. "\n"
+                    tty.preBuffer = ""
+                end
+                if tty.flags.echo then terminal.write(tty, "\n") terminal.redraw(tty) end
+            elseif param.keycode == 8 then
+                if tty.flags.cbreak then
+                    -- TODO: uh, what is this supposed to be?
+                elseif #tty.preBuffer > 0 then
+                    tty.preBuffer = tty.preBuffer:sub(1, -2)
+                    if tty.flags.echo then terminal.write(tty, "\b \b") terminal.redraw(tty) end
+                end
+            end
+        end
+    elseif event == "key_up" then
+        expect.field(param, "keycode", "number")
+        tty.frontmostProcess.eventQueue[#tty.frontmostProcess.eventQueue+1] = {"key_up", {keycode = param.keycode, ctrlHeld = keysHeld.ctrl, altHeld = keysHeld.alt, shiftHeld = keysHeld.shift}}
+    elseif event == "char" then
+        expect.field(param, "character", "string")
+        tty.frontmostProcess.eventQueue[#tty.frontmostProcess.eventQueue+1] = {"char", {character = param.character}}
+        if not tty.isLocked then
+            if tty.flags.cbreak then tty.buffer = tty.buffer .. param.character
+            else tty.preBuffer = tty.preBuffer .. param.character end
+            if tty.flags.echo then terminal.write(tty, param.character) terminal.redraw(tty) end
+        end
+    elseif event == "paste" then
+        expect.field(param, "text", "string")
+        tty.frontmostProcess.eventQueue[#tty.frontmostProcess.eventQueue+1] = {"paste", {text = param.text}}
+        if not tty.isLocked then
+            if tty.flags.cbreak then tty.buffer = tty.buffer .. param.text
+            else tty.preBuffer = tty.preBuffer .. param.text end
+            if tty.flags.echo then terminal.write(tty, param.text) terminal.redraw(tty) end
+        end
+    elseif event == "mouse_click" or event == "mouse_up" or event == "mouse_drag" then
+        expect.field(param, "x", "number")
+        expect.field(param, "y", "number")
+        expect.field(param, "button", "number")
+        -- TODO: buttonMask
+        tty.frontmostProcess.eventQueue[#tty.frontmostProcess.eventQueue+1] = {event, {x = param.x, y = param.y, button = param.button, buttonMask = 0}}
+    elseif event == "mouse_scroll" then
+        expect.field(param, "x", "number")
+        expect.field(param, "y", "number")
+        expect.field(param, "direction", "number")
+        -- TODO: buttonMask
+        tty.frontmostProcess.eventQueue[#tty.frontmostProcess.eventQueue+1] = {event, {x = param.x, y = param.y, button = param.direction}}
+    else error("Invalid event") end
+end
+
 function syscalls.stdin(process, thread, handle)
     expect(1, handle, "number", "table", "string", "nil")
     if process.stdin and process.stdin.isTTY and process.stdin.frontmostProcess == process then
-        process.stdin.frontmostProcess = table.remove(process.stdin.processList)
+        --process.stdin.frontmostProcess = table.remove(process.stdin.processList)
         process.stdin.preBuffer = ""
     end
-    if type(handle) == "number" then process.stdin = TTY[handle]
+    if type(handle) == "number" then
+        handle = TTY[handle]
+        if handle and process.stdin.frontmostProcess == process then
+            process.stdin.frontmostProcess = table.remove(process.stdin.processList)
+            handle.processList[#handle.processList+1] = handle.frontmostProcess
+            handle.frontmostProcess = process
+            if discord and process.stdin == currentTTY then discord("Phoenix", "Executing " .. process.name) end
+        end
+        process.stdin = handle
     elseif type(handle) == "string" then
         local node = hardware.get(handle)
         if not node then error("bad argument #1 (no such device)", 2) end
@@ -1313,7 +1417,11 @@ function syscalls.stdin(process, thread, handle)
             handle.frontmostProcess = process
         end
         process.stdin = handle
-    elseif handle == nil then process.stdin = nil
+    elseif handle == nil then
+        if process.stdin.frontmostProcess == process then
+            process.stdin.frontmostProcess = table.remove(process.stdin.processList)
+        end
+        process.stdin = nil
     else
         if handle.isTTY then
             handle = terminal.userTTYs[handle]
@@ -1342,10 +1450,18 @@ end
 function syscalls.stdout(process, thread, handle)
     expect(1, handle, "number", "table", "string", "nil")
     if process.stdout and process.stdout.isTTY and process.stdout.frontmostProcess == process then
-        process.stdout.frontmostProcess = table.remove(process.stdout.processList)
+        --process.stdout.frontmostProcess = table.remove(process.stdout.processList)
         if discord and process.stdout == currentTTY then discord("Phoenix", "Executing " .. process.stdout.frontmostProcess.name) end
     end
-    if type(handle) == "number" then process.stdout = TTY[handle]
+    if type(handle) == "number" then
+        handle = TTY[handle]
+        if handle and process.stdout.frontmostProcess == process then
+            process.stdout.frontmostProcess = table.remove(process.stdout.processList)
+            handle.processList[#handle.processList+1] = handle.frontmostProcess
+            handle.frontmostProcess = process
+            if discord and process.stdout == currentTTY then discord("Phoenix", "Executing " .. process.name) end
+        end
+        process.stdout = handle
     elseif type(handle) == "string" then
         local node = hardware.get(handle)
         if not node then error("bad argument #1 (no such device)", 2) end
@@ -1358,7 +1474,12 @@ function syscalls.stdout(process, thread, handle)
             if discord and process.stdout == currentTTY then discord("Phoenix", "Executing " .. process.name) end
         end
         process.stdout = handle
-    elseif handle == nil then process.stdout = nil
+    elseif handle == nil then
+        if process.stdout.frontmostProcess == process then
+            process.stdout.frontmostProcess = table.remove(process.stdout.processList)
+            if discord and process.stdout == currentTTY then discord("Phoenix", "Executing " .. process.name) end
+        end
+        process.stdout = nil
     else
         if handle.isTTY then
             handle = terminal.userTTYs[handle]
@@ -1386,9 +1507,17 @@ end
 function syscalls.stderr(process, thread, handle)
     expect(1, handle, "number", "table", "string", "nil")
     if process.stderr and process.stderr.isTTY and process.stderr.frontmostProcess == process then
-        process.stderr.frontmostProcess = table.remove(process.stderr.processList)
+        --process.stderr.frontmostProcess = table.remove(process.stderr.processList)
     end
-    if type(handle) == "number" then process.stderr = TTY[handle]
+    if type(handle) == "number" then
+        handle = TTY[handle]
+        if handle and process.stderr.frontmostProcess == process then
+            process.stderr.frontmostProcess = table.remove(process.stderr.processList)
+            handle.processList[#handle.processList+1] = handle.frontmostProcess
+            handle.frontmostProcess = process
+            if discord and process.stderr == currentTTY then discord("Phoenix", "Executing " .. process.name) end
+        end
+        process.stderr = handle
     elseif type(handle) == "string" then
         local node = hardware.get(handle)
         if not node then error("bad argument #1 (no such device)", 2) end
@@ -1400,7 +1529,11 @@ function syscalls.stderr(process, thread, handle)
             handle.frontmostProcess = process
         end
         process.stderr = handle
-    elseif handle == nil then process.stderr = nil
+    elseif handle == nil then
+        if process.stderr.frontmostProcess == process then
+            process.stderr.frontmostProcess = table.remove(process.stderr.processList)
+        end
+        process.stderr = nil
     else
         if handle.isTTY then
             handle = terminal.userTTYs[handle]

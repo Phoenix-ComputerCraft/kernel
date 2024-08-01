@@ -223,3 +223,164 @@ function createRequire(process, G)
 
     return G
 end
+
+-- Copy of require for the kernel
+
+do
+    local loaded, preload = {}, {}
+    package = {}
+    package.path = "/lib/?.lua;/lib/?/init.lua;/usr/lib/?.lua;/usr/lib/?/init.lua"
+    package.libpath = "/lib/lib?.a;/usr/lib/lib?.a"
+    package.config = "/\n;\n?\n!\n-"
+    package.loaded = loaded
+    package.preload = preload
+    package.forceload = false
+    for k, v in pairs(_G) do if type(v) == "table" then loaded[k] = v end end
+
+    local sentinel = setmetatable({}, {__newindex = function() end, __metatable = false})
+    local localLoaders = {}
+
+    local function fileLoader(name, path)
+        local stat, err = filesystem.stat(KERNEL, path)
+        if not stat then error(path .. ": " .. err, 3) end
+        if stat.owner ~= "root" or stat.worldPermissions.write then error(path .. ": Insecure file permissions", 3) end
+        for k, v in pairs(stat.permissions) do if k ~= "root" and v.write then error(path .. ": Insecure file permissions", 3) end end
+        local file, err = filesystem.open(KERNEL, path, "rb")
+        if not file then error(path .. ": " .. err, 3) end
+        local data = file.readAll()
+        file.close()
+        local fn, err = load(data, "@" .. path, nil, _G)
+        if not fn then error(path .. ": " .. err, 3) end
+        local dir = path:match("^(.*)/[^/]*$") or "/"
+        localLoaders[#localLoaders+1] = function(name2)
+            local path, err = package.searchpath(name2, dir .. "/?.lua;" .. dir .. "/?/init.lua")
+            if not path then return nil, err end
+            return fileLoader, path
+        end
+        local ok, res = pcall(fn, name)
+        localLoaders[#localLoaders] = nil
+        if ok then return res
+        else error(path .. ": " .. res, 3) end
+    end
+
+    local function libraryLoader(name, path)
+        local libname
+        if path:find "%z" then path, libname = path:match "^([^%z]*)%z(.*)$"
+        elseif name:find "%-" then libname = name:match("^([^%-]*)%-(.*)$")
+        else libname = "init" end
+        local stat, err = filesystem.stat(KERNEL, path)
+        if not stat then error(path .. ": " .. err, 3) end
+        if stat.owner ~= "root" or stat.worldPermissions.write then error(path .. ": Insecure file permissions", 3) end
+        for k, v in pairs(stat.permissions) do if k ~= "root" and v.write then error(path .. ": Insecure file permissions", 3) end end
+        local file, err = filesystem.open(KERNEL, path, "rb")
+        if not file then error(path .. ": " .. err, 3) end
+        local data = file.readAll()
+        file.close()
+        local dir = ar_load(data)
+        local function preloader(name)
+            local p = name .. ".lua"
+            if not dir[p] then error(path .. ":" .. p .. ": File not found", 0) end
+            local data = dir[p].data
+            local fn, err = load(data, "@" .. path .. ":" .. p, nil, _ENV)
+            if not fn then error(path .. ":" .. p .. ": " .. err, 3) end
+            local ok, res = pcall(fn, name)
+            if ok then return res
+            else error(path .. ":" .. p .. ": " .. res) end
+        end
+        localLoaders[#localLoaders+1] = function(name2) return preloader, name2 end
+        local res = preloader(libname)
+        localLoaders[#localLoaders] = nil
+        return res
+    end
+
+    function package.searchpath(name, path, sep, rep)
+        expect(1, name, "string")
+        expect(2, path, "string")
+        expect(3, sep, "string", "nil")
+        expect(4, rep, "string", "nil")
+        sep = (sep or "."):gsub("([%^%$%(%)%%%.%[%]%*%+%-%?])", "%%%1")
+        rep = (rep or "/"):gsub("([%^%$%(%)%%%.%[%]%*%+%-%?])", "%%%1")
+        local msg = ""
+
+        for p in path:gmatch "[^;]+" do
+            local pp = p:gsub("%?", name:gsub(sep, rep), nil)
+            local file, err = filesystem.open(KERNEL, pp, "r")
+            if file then
+                file.close()
+                return pp
+            else
+                msg = msg .. "\t" .. pp .. ": " .. err .. "\n"
+            end
+        end
+        return nil, msg
+    end
+
+    package.searchers = {
+        function(name)
+            local p = preload[name]
+            if p then return p else return nil, "\tpackage.preload['" .. name .. "']: No such field\n" end
+        end,
+        function(name)
+            local path, err = package.searchpath(name, package.path)
+            if not path then return nil, err end
+            return fileLoader, path, path
+        end,
+        function(name)
+            local path, err = package.searchpath(name:match("^[^%-]*"), package.libpath)
+            if not path then return nil, err end
+            local n = name:match("%-(.+)$")
+            if n then return libraryLoader, path, path .. ":" .. n
+            else return libraryLoader, path, path .. ":init" end
+        end,
+        function(name)
+            if not name:find "%." then return nil end
+            local path, err = package.searchpath(name:match("^[^%.]*"), package.libpath)
+            if not path then return nil, err end
+            local n = name:match("^[^%.]*%.(.*)$")
+            return libraryLoader, path .. "\0" .. n, path .. ":" .. n
+        end,
+        function(name)
+            if #localLoaders > 0 then return localLoaders[#localLoaders](name) end
+            return nil, "\tno local loaders found"
+        end
+    }
+
+    function require(name)
+        expect(1, name, "string")
+        local err = "module '" .. name .. "' not found:\n"
+        local loader, arg, pathname
+        for _, v in ipairs(package.searchers) do
+            loader, arg, pathname = v(name)
+            if loader then break end
+            err = err .. (arg or "")
+        end
+        if not loader then error(err, 2) end
+        if pathname then
+            if loaded[pathname] then
+                if loaded[pathname] == sentinel then error("loop detected loading '" .. name .. "'", 3)
+                elseif not package.forceload then return loaded[pathname] end
+            end
+            loaded[pathname] = sentinel
+        else
+            if loaded[name] then
+                if loaded[name] == sentinel then error("loop detected loading '" .. name .. "'", 3)
+                elseif not package.forceload then return loaded[name] end
+            end
+        end
+        loaded[name] = sentinel
+        local ok, res = pcall(loader, name, arg)
+        if ok then
+            if res ~= nil then loaded[name] = res
+            elseif loaded[name] == sentinel then loaded[name] = true end
+            if pathname then
+                if res ~= nil then loaded[pathname] = res
+                elseif loaded[pathname] == sentinel then loaded[pathname] = true end
+            end
+            return loaded[name]
+        else
+            loaded[name] = nil
+            if pathname then loaded[pathname] = nil end
+            error(err .. "\t" .. res .. "\n", 2)
+        end
+    end
+end

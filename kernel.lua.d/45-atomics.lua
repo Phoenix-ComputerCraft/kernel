@@ -2,7 +2,7 @@ local nextMutexID = 0
 
 function syscalls.lockmutex(process, thread, mtx)
     expect(1, mtx, "table")
-    while mtx.owner ~= nil and mtx.owner ~= thread.id do coroutine.yield() end
+    while (mtx.owner ~= nil and mtx.owner ~= thread.id) or (mtx.pid ~= nil and mtx.pid ~= process.id) do coroutine.yield() end
     if mtx.owner then
         if type(mtx.recursive) == "number" then
             mtx.recursive = mtx.recursive + 1
@@ -10,6 +10,7 @@ function syscalls.lockmutex(process, thread, mtx)
         else error("cannot recursively lock mutex", 0) end
     end
     mtx.owner = thread.id
+    mtx.pid = process.id
     if mtx.recursive then mtx.recursive = 1 end
 end
 
@@ -45,11 +46,11 @@ end
 
 function syscalls.unlockmutex(process, thread, mtx)
     expect(1, mtx, "table")
-    if mtx.owner == thread.id then
+    if mtx.owner == thread.id and mtx.pid == process.id then
         if type(mtx.recursive) == "number" then
             mtx.recursive = mtx.recursive - 1
             if mtx.recursive <= 0 then mtx.owner = nil end
-        else mtx.owner = nil end
+        else mtx.owner, mtx.pid = nil end
     elseif mtx.owner == nil then error("mutex already unlocked", 0)
     else error("mutex not locked by current thread") end
 end
@@ -57,14 +58,15 @@ end
 function syscalls.trylockmutex(process, thread, mtx)
     expect(1, mtx, "table")
     if mtx.owner then
-        if mtx.owner ~= process.id then
+        if mtx.owner ~= thread.id or mtx.pid ~= process.id then
             return false
         elseif type(mtx.recursive) == "number" then
             mtx.recursive = mtx.recursive + 1
             return true
         else error("cannot recursively lock mutex", 0) end
     else
-        mtx.owner = process.id
+        mtx.owner = thread.id
+        mtx.pid = process.id
         if mtx.recursive then mtx.recursive = 1 end
         return true
     end

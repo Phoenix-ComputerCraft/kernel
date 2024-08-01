@@ -58,6 +58,9 @@ mounts = {}
 --- Stores all FIFOs in a table-indexed table.
 fifos = {}
 
+--- Stores paths that have fsevents registered, and the process(es) that are listening.
+fsevents = {}
+
 --- This table contains all filesystem types. Use this to insert more filesystem
 -- types into the system.
 --
@@ -119,6 +122,25 @@ end
 -- @treturn[2] nil If an error occurred
 -- @treturn[2] string An error message describing why the file couldn't be opened
 function filesystem.readhandle(process, data, binary)
+    if data == "" then
+        local didRead = false
+        local function read()
+            if didRead then return nil end
+            didRead = true
+            return ""
+        end
+        local handle = {
+            readLine = read,
+            readAll = read,
+            read = read,
+            close = function() end
+        }
+        if binary then
+            function handle.seek() didRead = false end
+            function handle.read(n) if not n then return nil end return read() end
+        end
+        return handle
+    end
     local pos = 1
     local closed = false
     local t = {
@@ -190,13 +212,14 @@ end
 
 --- Creates a new write file handle with a generic writer.
 -- @tparam Process process The process to open as
--- @tparam function(data:string,reset:boolean) writer A function to call to write pending data to the file
+-- @tparam function(data:string,reset:boolean) writer A function to call to write pending data to the file - user mode!
 -- If reset is true, data contains the entire file and old contents should be replaced; otherwise, it contains just the new data to append
 -- @tparam boolean binary Whether to open in binary mode
 -- @treturn[1] Handle The new file handle
 -- @treturn[2] nil If an error occurred
 -- @treturn[2] string An error message describing why the file couldn't be opened
 function filesystem.writehandle(process, writer, binary)
+    setfenv(writer, process.env)
     local function setenv(t)
         for _, v in pairs(t) do setfenv(v, process.env) debug.protect(v) end
         return setmetatable(t, {__name = "file"})
@@ -584,7 +607,7 @@ function filesystems.craftos:open(process, path, mode)
     elseif stat.type == "directory" then return nil, "Is a directory" end
     local perms = stat.permissions[process.user] or stat.worldPermissions
     --syslog.debug(path, mode, perms.read, perms.write, perms.execute)
-    if (mode:sub(1, 1) == "r" and not perms.read) or ((mode:sub(1, 1) == "w" or mode:sub(1, 1) == "a") and not perms.write) then return nil, "Permission denied" end
+    if process.user ~= "root" and ((mode:sub(1, 1) == "r" and not perms.read) or ((mode:sub(1, 1) == "w" or mode:sub(1, 1) == "a") and not perms.write)) then return nil, "Permission denied" end
     if stat.type == "fifo" then
         local meta = self:getmeta(process.user, fs.combine(self.path, path))
         local fifo = fifos[meta]
@@ -1348,6 +1371,20 @@ end
 
 -- Syscalls
 
+local function dofsevent(process, path, event, dir)
+    local rp = getRealPath(process, path)
+    if dir then
+        if rp == "" then rp = nil
+        else rp = fs.getDir(rp) end
+    end
+    --syslog.debug("Triggering fsevents for", rp)
+    if rp and fsevents[rp] then for _, v in pairs(fsevents[rp]) do
+        local pp = rp
+        if pp:find(v.root, 1, true) == 1 then pp = pp:sub(#v.root + 1) end
+        v.eventQueue[#v.eventQueue+1] = {"fsevent", {path = pp, event = event, name = dir and fs.getName(rp) or nil, process = process.id}}
+    end end
+end
+
 --- Opens a file for reading or writing.
 -- @tparam Process process The process to operate as
 -- @tparam string path The file path to open, which may be absolute or relative
@@ -1365,7 +1402,12 @@ function filesystem.open(process, path, mode)
         local ok, mount, p = pcall(getMount, process, path)
         if not ok then return nil, mount end
         local res = table.pack(pcall(mount.open, mount, process, p, mode))
-        if res[1] then return table.unpack(res, 2, res.n)
+        if res[1] then
+            if res[2] and mode ~= "r" and mode ~= "rb" then
+                dofsevent(process, path, "open", false)
+                dofsevent(process, path, "open_child", true)
+            end
+            return table.unpack(res, 2, res.n)
         elseif type(res[2]) ~= "table" or type(res[2].path) ~= "string" then error(res[2], 2) end
         path = res[2].path
     until res[1]
@@ -1423,7 +1465,10 @@ function filesystem.remove(process, path)
     repeat
         local mount, p = getMount(process, path)
         local ok, res = pcall(mount.remove, mount, process, p)
-        if ok then return
+        if ok then
+            dofsevent(process, path, "remove", false)
+            dofsevent(process, path, "remove_child", true)
+            return
         elseif type(res) ~= "table" or type(res.path) ~= "string" then error(res, 2) end
         path = res.path
     until ok
@@ -1444,7 +1489,12 @@ function filesystem.rename(process, from, to)
         local mountB, pB = getMount(process, to)
         if mountA ~= mountB then error("Attempt to rename file across two filesystems", 0) end
         local ok, res = pcall(mountA.rename, mountA, process, pA, pB)
-        if ok then return
+        if ok then
+            dofsevent(process, from, "rename_from", false)
+            dofsevent(process, from, "rename_from_child", true)
+            dofsevent(process, to, "rename_to", false)
+            dofsevent(process, to, "rename_to_child", true)
+            return
         elseif type(res) ~= "table" or type(res.path) ~= "string" then error(res, 2) end
         if res.orig == from then from = res.path
         else to = res.path end
@@ -1461,7 +1511,10 @@ function filesystem.mkdir(process, path)
     repeat
         local mount, p = getMount(process, path)
         local ok, res = pcall(mount.mkdir, mount, process, p)
-        if ok then return
+        if ok then
+            dofsevent(process, path, "mkdir", false)
+            dofsevent(process, path, "mkdir_child", true)
+            return
         elseif type(res) ~= "table" or type(res.path) ~= "string" then error(res, 2) end
         path = res.path
     until ok
@@ -1481,7 +1534,10 @@ function filesystem.link(process, path, location)
         local mount, p = getMount(process, path)
         if not mount.link then error("Filesystem does not support links", 2) end
         local ok, res = pcall(mount.link, mount, process, p, location)
-        if ok then return
+        if ok then
+            dofsevent(process, path, "link", false)
+            dofsevent(process, path, "link_child", true)
+            return
         elseif type(res) ~= "table" or type(res.path) ~= "string" then error(res, 2) end
         path = res.path
     until ok
@@ -1497,7 +1553,10 @@ function filesystem.mkfifo(process, path)
         local mount, p = getMount(process, path)
         if not mount.mkfifo then error("Filesystem does not support FIFOs", 2) end
         local ok, res = pcall(mount.mkfifo, mount, process, p)
-        if ok then return
+        if ok then
+            dofsevent(process, path, "mkfifo", false)
+            dofsevent(process, path, "mkfifo_child", true)
+            return
         elseif type(res) ~= "table" or type(res.path) ~= "string" then error(res, 2) end
         path = res.path
     until ok
@@ -1626,6 +1685,7 @@ end
 -- @tparam string ... Any additional path components to add
 -- @treturn string The final combined path
 function filesystem.combine(first, ...)
+    expect(1, first, "string")
     local str = fs.combine(first, ...)
     if first:match "^/" then str = "/" .. str end
     return str
@@ -1666,6 +1726,7 @@ function syscalls.loadCraftOSAPI(process, thread, apiName)
             return env.dofile("rom/modules/main/" .. name:gsub("%.", "/") .. ".lua")
         end
     }, {__index = process.env})
+    env._ENV = env
     if apiName:sub(1, 3) == "cc." then
         local path = fs.combine("rom/modules/main", apiName:gsub("%.", "/") .. ".lua")
         if not path:match "^/?rom/modules/main/" then error("Invalid module path", 0) end
@@ -1680,9 +1741,19 @@ function syscalls.loadCraftOSAPI(process, thread, apiName)
         if not fn then error("Could not load module: " .. err, 0) end
         fn()
         local t = {}
-        for k,v in pairs(env) do if k ~= "dofile" then t[k] = v end end
+        for k,v in pairs(env) do if k ~= "dofile" and k ~= "require" and k ~= "_ENV" then t[k] = v end end
         return t
     end
+end
+
+function syscalls.fsevent(process, thread, path, enabled)
+    expect(1, path, "string")
+    expect(2, enabled, "boolean", "nil")
+    if enabled == nil then enabled = true end
+    path = getRealPath(process, path)
+    syslog.debug("Registering fsevents for", path)
+    fsevents[path] = fsevents[path] or setmetatable({}, {__mode = "v"})
+    fsevents[path][#fsevents[path]+1] = enabled and process or nil
 end
 
 xpcall(function()

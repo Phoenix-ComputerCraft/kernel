@@ -124,6 +124,12 @@ end
 
 ---@param process Process
 ---@param thread Thread
+function syscalls.getfenv(process, thread)
+    return process.env
+end
+
+---@param process Process
+---@param thread Thread
 function syscalls.getname(process, thread)
     return process.name
 end
@@ -160,6 +166,22 @@ function syscalls.setuser(process, thread, user)
     process.realuser = nil
 end
 
+local function makeMetatables(G)
+    return {
+        ["nil"] = {},
+        ["boolean"] = {__unm = function() --[[TODO]] end},
+        ["number"] = {},
+        ["string"] = {__index = G.string},
+        ["function"] = {},
+        -- This adds the coroutine library to coroutine types, and allows calling coroutines to resume
+        -- ex: while coro:status() == "suspended" do coro("hello") end
+        -- This should be a thing in base Lua, but since not we'll make it available system-wide!
+        -- Programs can rely on this behavior existing
+        ["thread"] = {__index = G.coroutine, __call = G.coroutine.resume},
+        ["userdata"] = {}
+    }
+end
+
 ---@param process Process
 ---@param thread Thread
 function syscalls.fork(process, thread, func, name, ...)
@@ -179,7 +201,6 @@ function syscalls.fork(process, thread, func, name, ...)
         stdout = process.stdout,
         stderr = process.stderr,
         vars = deepcopy(process.vars),
-        globalMetatables = deepcopy(globalMetatables),
         cputime = 0,
         systime = 0,
         syscallyield = nil,
@@ -223,6 +244,7 @@ function syscalls.fork(process, thread, func, name, ...)
         }
     }
     processes[id].env = mkenv(processes[id])
+    processes[id].globalMetatables = makeMetatables(processes[id].env)
     setfenv(func, processes[id].env)
     if process.stdin and process.stdin.isTTY and not process.stdin.isLocked then
         process.stdin.processList[#process.stdin.processList+1] = process.stdin.frontmostProcess
@@ -334,6 +356,20 @@ function syscalls.exit(process, thread, code)
         thread.status = "dead"
         thread.return_value = code
     end
+end
+
+---@param process Process
+---@param thread Thread
+function syscalls.atexit(process, thread, fn)
+    expect(1, fn, "function")
+    process.dependents[#process.dependents+1] = {gc = function()
+        local id = syscalls.newthread(process, nil, fn)
+        local i = 0
+        while process.threads[id] and process.threads[id].coro:status() == "suspended" and i < 100 do
+            executeThread(process, process.threads[id], {n = 0}, false, false)
+            i = i + 1
+        end
+    end}
 end
 
 ---@param process Process

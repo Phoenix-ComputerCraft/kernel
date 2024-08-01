@@ -831,7 +831,7 @@ eventHooks.http_failure = eventHooks.http_failure or {}
 eventHooks.http_failure[#eventHooks.http_failure+1] = function(ev)
     local info = httpRequests[ev[2]]
     if info then
-        if ev[4] then info.handle, info.status = ev[3], "open"
+        if ev[4] then info.handle, info.status = ev[4], "open"
         else info.status, info.error = "error", ev[3] end
         info.process.eventQueue[#info.process.eventQueue+1] = {"handle_status_change", {id = info.id, status = info.status}}
         httpRequests[ev[2]] = nil

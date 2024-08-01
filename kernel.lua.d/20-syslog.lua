@@ -288,12 +288,14 @@ local oldpanic = panic
 -- @tparam[opt] any message A message to display on screen
 function panic(message)
     xpcall(function()
+        TTY[1].isLocked = false
         syslog.log({level = "panic"}, "Kernel panic:", message)
         if debug then
             local traceback = debug.traceback(nil, 2)
             syslog.log({level = "panic", traceback = true}, traceback)
         end
         syslog.log({level = "panic"}, "We are hanging here...")
+        terminal.redraw(TTY[1], true)
         term.setCursorBlink(false)
         mainThread = nil
         while true do coroutine.yield() end

@@ -134,6 +134,7 @@ function createLuaLib(process)
     G.table = deepcopy(table)
     G.math = deepcopy(math)
     G.bit32 = deepcopy(bit32)
+    G.utf8 = deepcopy(utf8)
 
     -- The default math.random uses a global seed which cannot be shared between processes,
     -- so we need to implement our own randomizer.
@@ -144,10 +145,10 @@ function createLuaLib(process)
     -- NOTE: Do not intentionally yield a coroutine with a single `preempt` value! This will trigger
     -- the preemption code here, making your coroutine not actually yield back to your program.
     local oldresume = G.coroutine.resume
-    G.coroutine.resume = function(...)
-        local retval = table.pack(oldresume(...))
-        while retval.n == 2 and retval[1] == true and retval[2] == "preempt" do
-            retval = table.pack(oldresume(coroutine.yield("preempt")))
+    G.coroutine.resume = function(coro, ...)
+        local retval = table.pack(oldresume(coro, ...))
+        while retval.n >= 2 and retval[1] == true and (retval[2] == "preempt" or retval[2] == "secure_syscall" or retval[2] == "secure_event") do
+            retval = table.pack(oldresume(coro, coroutine.yield(table.unpack(retval, 2, retval.n))))
         end
         return table.unpack(retval, 1, retval.n)
     end

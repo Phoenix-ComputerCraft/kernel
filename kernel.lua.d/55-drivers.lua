@@ -627,9 +627,9 @@ eventHooks.monitor_resize[#eventHooks.monitor_resize+1] = function(ev)
         syslog.log({level = "notice", module = "Hardware"}, "Received " .. ev[1] .. " event for device ID " .. ev[2] .. ", but no device node was found; ignoring")
         return
     end
-    local w, h = drivers.peripheral_monitor.methods.getSize(node)
-    terminal.resize(node.internalState.tty, w, h)
-    hardware.broadcast(node, "monitor_resize", {device = hardware.path(node), width = w, height = h})
+    local size = drivers.peripheral_monitor.methods.getSize(node)
+    terminal.resize(node.internalState.tty, size.width, size.height)
+    hardware.broadcast(node, "monitor_resize", {device = hardware.path(node), width = size.width, height = size.height})
 end
 
 -- TODO: monitor_touch/mouse event handling
@@ -770,7 +770,7 @@ end
 
 drivers.peripheral_speaker.methods.stop = noArgMethod "stop"
 
-function drivers.peripheral_command:init()
+function drivers.peripheral_speaker:init()
     checkCall(self)
     self.displayName = "Speaker at " .. self.id
 end
