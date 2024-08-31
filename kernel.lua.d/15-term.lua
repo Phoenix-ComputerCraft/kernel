@@ -124,6 +124,9 @@ eventHooks.key[#eventHooks.key+1] = function(ev)
         elseif ev[2] == keys.backslash then killProcess(currentTTY.frontmostProcess.id, 3) terminal.write(currentTTY, "^\\")
         elseif ev[2] == keys.z then killProcess(currentTTY.frontmostProcess.id, 19) terminal.write(currentTTY, "^Z")
         elseif ev[2] == keys.d then currentTTY.eof = true terminal.write(currentTTY, "^D")
+        elseif ev[2] == keys.l and currentTTY.cursor.y > 1 then
+            local y = currentTTY.cursor.y - 1 -- minifier error
+            terminal.write(currentTTY, "\x1b[" .. y .. "T\x1b[1;" .. currentTTY.cursor.x .. "H")
         -- TODO: fill in other cool keys
         end
     end
@@ -511,6 +514,7 @@ local CSI = {
             table.insert(tty, 1, {(' '):rep(tty.size.width), tty.colors.fg:rep(tty.size.width), tty.colors.bg:rep(tty.size.width)})
             tty[tty.size.height + 1] = nil
         end
+        for y = 1, tty.size.height do tty.dirtyLines[y] = true end
     end, -- SU
     T = function(tty, params)
         local n = params[1] or 0
@@ -520,6 +524,7 @@ local CSI = {
             table.remove(tty, 1)
             tty[tty.size.height] = {(' '):rep(tty.size.width), tty.colors.fg:rep(tty.size.width), tty.colors.bg:rep(tty.size.width)}
         end
+        for y = 1, tty.size.height do tty.dirtyLines[y] = true end
     end, -- SD
     U = function(tty, params) end, -- NP
     V = function(tty, params) end, -- PP
@@ -1331,9 +1336,9 @@ function syscalls.__ttyevent(process, thread, usertty, event, param)
     local tty = terminal.userTTYs[usertty]
     if not tty then error("Invalid TTY") end
     if tty.process ~= process then error("Invalid TTY") end
-    syslog.debug("TTY event", event, tostring(tty.frontmostProcess))
+    --syslog.debug("TTY event", event, tostring(tty.frontmostProcess))
     if not tty.frontmostProcess then return end
-    syslog.debug(tostring(tty), tostring(tty.frontmostProcess.stdin), tostring(tty.frontmostProcess.stdout), tostring(tty.frontmostProcess.stderr))
+    --syslog.debug(tostring(tty), tostring(tty.frontmostProcess.stdin), tostring(tty.frontmostProcess.stdout), tostring(tty.frontmostProcess.stderr))
     if event == "key" then
         expect.field(param, "keycode", "number")
         expect.field(param, "isRepeat", "boolean")

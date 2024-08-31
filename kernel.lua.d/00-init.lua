@@ -17,7 +17,21 @@ end
 -- textutils.[un]serialize is also very useful, so we load that in (but not anything else)
 do
     local file = fs.open("/rom/apis/textutils.lua", "r")
-    local env = setmetatable({dofile = function() return expect end}, {__index = _G}) -- We stub `dofile` here since textutils loads in expect via `dofile`
+    local env = setmetatable({
+        dofile = function(path)
+            if path == "rom/modules/main/cc/expect.lua" then return expect
+            elseif path == "rom/modules/main/cc/require.lua" then
+                return {
+                    make = function()
+                        return function(mod)
+                            if mod == "cc.expect" then return expect
+                            else return {} end
+                        end
+                    end
+                }
+            end
+        end
+    }, {__index = _G}) -- We stub `dofile` here since textutils loads in expect via `dofile`, or through `cc.require` loaded by `dofile`
     local fn
     if loadstring and setfenv then
         fn = loadstring(file.readAll(), "@/rom/apis/textutils.lua")
@@ -911,7 +925,7 @@ function userModeCallback(process, func, ...)
         if coroutine.running() == mainThread then error("userModeCallback not called from a yieldable context", 2) end
         coroutine.yield()
     end
-    syslog.log({level = "debug", process = process.id, thread = id}, "Usermode callback completed")
+    --syslog.log({level = "debug", process = process.id, thread = id}, "Usermode callback completed")
     return not thread.did_error, thread.return_value
 end
 

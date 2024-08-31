@@ -98,9 +98,12 @@ local function getRealPath(process, path)
     return p
 end
 
-local function getMount(process, path)
+local function getMount(process, path, list)
     local fullPath = split(getRealPath(process, path), "/\\")
-    if #fullPath == 0 then return mounts[""], path, "" end
+    if #fullPath == 0 then
+        if list then return mounts[""], path, "" end
+        return mounts[""][1], path, ""
+    end
     local maxPath
     for k in pairs(mounts) do
         local ok = true
@@ -111,7 +114,19 @@ local function getMount(process, path)
     local parts = split(maxPath, "/\\")
     local p = #fullPath >= #parts + 1 and fs.combine(table.unpack(fullPath, #parts + 1, #fullPath)) or ""
     --syslog.debug(path, #parts, #fullPath, p)
-    return mounts[maxPath], p, maxPath
+    local mounts = mounts[maxPath]
+    if list then return mounts, p, maxPath end
+    local mount = mounts[1]
+    if #mounts > 1 then
+        for _, v in ipairs(mounts) do
+            local ok, res = pcall(v.stat, v, process, p, true)
+            if ok and res then
+                mount = v
+                break
+            end
+        end
+    end
+    return mount, p, maxPath
 end
 
 --- Creates a new read file handle over string data.
@@ -496,7 +511,11 @@ function filesystems.craftos:getmeta(user, path, nolink)
             elseif not t.meta.worldPermissions.execute then error("Permission denied", 2) end
             stack[#stack+1] = t
             t = t.contents[p]
-            if t and t.meta.type == "link" and not (nolink and i == #parts) then syslog.debug("linking " .. path .. " to " .. filesystem.combine(t.meta.link, table.unpack(parts, i + 1))) error {link = true, path = filesystem.combine(t.meta.link, table.unpack(parts, i + 1)), orig = path} end
+            if t and t.meta.type == "link" and not nolink then
+                local link = filesystem.combine(t.meta.link, table.unpack(parts, i + 1))
+                if fs.combine(link) == fs.combine(path) then error("Loop in link", 2) end
+                error {link = true, path = link, orig = path}
+            end
         end
     end
     return t and t.meta
@@ -530,7 +549,11 @@ function filesystems.craftos:setmeta(user, path, meta, nolink)
             stack[#stack+1] = t
             t = t.contents[p]
             name = p
-            if t and t.meta.type == "link" and not (nolink and i == #parts) then syslog.debug("linking " .. path .. " to " .. filesystem.combine(t.meta.link, table.unpack(parts, i + 1))) error {link = true, path = filesystem.combine(t.meta.link, table.unpack(parts, i + 1)), orig = path} end
+            if t and t.meta.type == "link" and not nolink then
+                local link = filesystem.combine(t.meta.link, table.unpack(parts, i + 1))
+                if fs.combine(link) == fs.combine(path) then error("Loop in link", 2) end
+                error {link = true, path = link, orig = path}
+            end
         end
     end
     if meta ~= nil then
@@ -617,7 +640,9 @@ function filesystems.craftos:open(process, path, mode)
         end
         return filesystem.fifohandle(process, fifo, mode)
     end
-    return setmetatable(fs.open(fs.combine(self.path, path), mode), {__name = "file"})
+    local file, err = fs.open(fs.combine(self.path, path), mode)
+    if not file then return nil, err end
+    return setmetatable(file, {__name = "file"})
 end
 
 function filesystems.craftos:list(process, path)
@@ -752,8 +777,9 @@ function filesystems.craftos:mkdir(process, path)
 end
 
 function filesystems.craftos:link(process, path, location)
-    local stat = self:stat(process, path)
+    local stat = self:stat(process, path, true)
     if stat then error(path .. ": File exists", 2) end
+    self:setmeta(process.user, fs.combine(self.path, path), nil, true)
     assert(self:open(process, path, "w")).close()
     local meta = self:getmeta(process.user, fs.combine(self.path, path), true)
     meta.type, meta.link = "link", location
@@ -1270,7 +1296,7 @@ setmetatable(filesystems.tablefs, {__index = filesystems.tmpfs})
 function filesystems.tablefs:new(process, src, options)
     local t
     local file, err
-    if process == KERNEL and mounts[""] then file, err = filesystem.open(process, src, "r")
+    if process ~= KERNEL and mounts[""] then file, err = filesystem.open(process, src, "r")
     else file, err = fs.open(src, "r") end
     if file then
         local data = file.readAll() or ""
@@ -1398,7 +1424,7 @@ function filesystem.open(process, path, mode)
     expect(1, path, "string")
     expect(2, mode, "string")
     if not mode:match "^[rwa]b?$" then error("Invalid mode", 0) end
-    repeat
+    for _ = 1, 1000 do
         local ok, mount, p = pcall(getMount, process, path)
         if not ok then return nil, mount end
         local res = table.pack(pcall(mount.open, mount, process, p, mode))
@@ -1410,7 +1436,24 @@ function filesystem.open(process, path, mode)
             return table.unpack(res, 2, res.n)
         elseif type(res[2]) ~= "table" or type(res[2].path) ~= "string" then error(res[2], 2) end
         path = res[2].path
-    until res[1]
+    end
+    error("Too many levels of symbolic links", 2)
+end
+
+local function list_inner(process, path, root)
+    local retval = {}
+    local mounts, p = getMount(process, path, true)
+    for _, mount in ipairs(mounts) do
+        local ok, res = pcall(mount.list, mount, process, p)
+        if not ok then
+            if type(res) ~= "table" or type(res.path) ~= "string" then
+                if #mounts == 1 and root then error(res, 2)
+                else res = {} end
+            else res = list_inner(process, res.path, false) end
+        end
+        for _, v in ipairs(res) do retval[#retval+1] = v end
+    end
+    return retval
 end
 
 --- Returns a list of file names in the directory.
@@ -1421,13 +1464,9 @@ end
 function filesystem.list(process, path)
     expect(0, process, "table")
     expect(1, path, "string")
-    repeat
-        local mount, p = getMount(process, path)
-        local ok, res = pcall(mount.list, mount, process, p)
-        if ok then return res
-        elseif type(res) ~= "table" or type(res.path) ~= "string" then error(res, 2) end
-        path = res.path
-    until ok
+    local retval = list_inner(process, path, true)
+    table.sort(retval)
+    return retval
 end
 
 --- Returns a table with information about the selected path.
@@ -1443,7 +1482,7 @@ end
 function filesystem.stat(process, path, nolink)
     expect(0, process, "table")
     expect(1, path, "string")
-    repeat
+    for _ = 1, 1000 do
         local ok, mount, p, mp = pcall(getMount, process, path)
         if not ok then return nil, mount end
         local ok2, res, err = pcall(mount.stat, mount, process, p, nolink)
@@ -1452,7 +1491,8 @@ function filesystem.stat(process, path, nolink)
             return res, err
         elseif type(res) ~= "table" or type(res.path) ~= "string" then error(res, 2) end
         path = res.path
-    until ok2
+    end
+    error("Too many levels of symbolic links", 2)
 end
 
 --- Removes a file or directory.
@@ -1462,7 +1502,7 @@ end
 function filesystem.remove(process, path)
     expect(0, process, "table")
     expect(1, path, "string")
-    repeat
+    for _ = 1, 1000 do
         local mount, p = getMount(process, path)
         local ok, res = pcall(mount.remove, mount, process, p)
         if ok then
@@ -1471,7 +1511,8 @@ function filesystem.remove(process, path)
             return
         elseif type(res) ~= "table" or type(res.path) ~= "string" then error(res, 2) end
         path = res.path
-    until ok
+    end
+    error("Too many levels of symbolic links", 2)
 end
 
 --- Renames (moves) a file or directory.
@@ -1484,7 +1525,7 @@ function filesystem.rename(process, from, to)
     expect(0, process, "table")
     expect(1, from, "string")
     expect(2, to, "string")
-    repeat
+    for _ = 1, 1000 do
         local mountA, pA = getMount(process, from)
         local mountB, pB = getMount(process, to)
         if mountA ~= mountB then error("Attempt to rename file across two filesystems", 0) end
@@ -1498,7 +1539,8 @@ function filesystem.rename(process, from, to)
         elseif type(res) ~= "table" or type(res.path) ~= "string" then error(res, 2) end
         if res.orig == from then from = res.path
         else to = res.path end
-    until ok
+    end
+    error("Too many levels of symbolic links", 2)
 end
 
 --- Creates a new directory and any parent directories.
@@ -1508,7 +1550,7 @@ end
 function filesystem.mkdir(process, path)
     expect(0, process, "table")
     expect(1, path, "string")
-    repeat
+    for _ = 1, 1000 do
         local mount, p = getMount(process, path)
         local ok, res = pcall(mount.mkdir, mount, process, p)
         if ok then
@@ -1517,7 +1559,8 @@ function filesystem.mkdir(process, path)
             return
         elseif type(res) ~= "table" or type(res.path) ~= "string" then error(res, 2) end
         path = res.path
-    until ok
+    end
+    error("Too many levels of symbolic links", 2)
 end
 
 --- Creates a new (symbolic) link.
@@ -1530,7 +1573,7 @@ function filesystem.link(process, path, location)
     expect(2, location, "string")
     if fs.combine(path) == fs.combine(location) then error("Cannot link file to itself", 2) end
     syslog.debug("Creating link", path, " => ", location)
-    repeat
+    for _ = 1, 1000 do
         local mount, p = getMount(process, path)
         if not mount.link then error("Filesystem does not support links", 2) end
         local ok, res = pcall(mount.link, mount, process, p, location)
@@ -1540,7 +1583,8 @@ function filesystem.link(process, path, location)
             return
         elseif type(res) ~= "table" or type(res.path) ~= "string" then error(res, 2) end
         path = res.path
-    until ok
+    end
+    error("Too many levels of symbolic links", 2)
 end
 
 --- Creates a new FIFO.
@@ -1549,7 +1593,7 @@ end
 function filesystem.mkfifo(process, path)
     expect(0, process, "table")
     expect(1, path, "string")
-    repeat
+    for _ = 1, 1000 do
         local mount, p = getMount(process, path)
         if not mount.mkfifo then error("Filesystem does not support FIFOs", 2) end
         local ok, res = pcall(mount.mkfifo, mount, process, p)
@@ -1559,7 +1603,8 @@ function filesystem.mkfifo(process, path)
             return
         elseif type(res) ~= "table" or type(res.path) ~= "string" then error(res, 2) end
         path = res.path
-    until ok
+    end
+    error("Too many levels of symbolic links", 2)
 end
 
 --- Changes the permissions (mode) of a file or directory for the specified user.
@@ -1581,13 +1626,14 @@ function filesystem.chmod(process, path, user, mode)
         expect.field(mode, "write", "boolean", "nil")
         expect.field(mode, "execute", "boolean", "nil")
     end
-    repeat
+    for _ = 1, 1000 do
         local mount, p = getMount(process, path)
         local ok, res = pcall(mount.chmod, mount, process, p, user, mode)
         if ok then return
         elseif type(res) ~= "table" or type(res.path) ~= "string" then error(res, 2) end
         path = res.path
-    until ok
+    end
+    error("Too many levels of symbolic links", 2)
 end
 
 --- Changes the owner of a file or directory.
@@ -1599,13 +1645,14 @@ function filesystem.chown(process, path, user)
     expect(0, process, "table")
     expect(1, path, "string")
     expect(2, user, "string")
-    repeat
+    for _ = 1, 1000 do
         local mount, p = getMount(process, path)
         local ok, res = pcall(mount.chown, mount, process, p, user)
         if ok then return
         elseif type(res) ~= "table" or type(res.path) ~= "string" then error(res, 2) end
         path = res.path
-    until ok
+    end
+    error("Too many levels of symbolic links", 2)
 end
 
 --- Changes the root directory for the current (and future child) processes.
@@ -1639,17 +1686,20 @@ function filesystem.mount(process, type, src, dest, options)
     if not filesystems[type] then error("No such filesystem '" .. type .. "'", 2) end
     local p = getRealPath(process, dest)
     if p == "" then
-        if process.user ~= "root" then error("Could not mount to " .. dest .. ": Permission denied", 2)
-        elseif mounts[p] then error("Could not mount to " .. dest .. ": Mount already exists") end
+        if process.user ~= "root" then error("Could not mount to " .. dest .. ": Permission denied", 2) end
+        if mounts[p] and not (options and options.overlay) then error("Could not mount to " .. dest .. ": Mount already exists (use overlay to mount over)") end
+        if not mounts[p] and (options and options.overlay) then error("Could not mount to " .. dest .. ": No base mount exists for overlay") end
     else
         local stat = filesystem.stat(process, dest)
-        if not stat then error("Could not mount to " .. dest .. ": No such directory", 2)
-        elseif stat.type ~= "directory" then error("Could not mount to " .. dest .. ": Not a directory", 2)
-        elseif process.user ~= "root" and not (stat.permissions[process.user] or stat.worldPermissions).write then error("Could not mount to " .. dest .. ": Permission denied", 2)
-        elseif mounts[p] then error("Could not mount to " .. dest .. ": Mount already exists") end
+        if not stat then error("Could not mount to " .. dest .. ": No such directory", 2) end
+        if stat.type ~= "directory" then error("Could not mount to " .. dest .. ": Not a directory", 2) end
+        if process.user ~= "root" and not (stat.permissions[process.user] or stat.worldPermissions).write then error("Could not mount to " .. dest .. ": Permission denied", 2) end
+        if mounts[p] and not (options and options.overlay) then error("Could not mount to " .. dest .. ": Mount already exists (use overlay to mount over)") end
+        if not mounts[p] and (options and options.overlay) then error("Could not mount to " .. dest .. ": No base mount exists for overlay") end
     end
     local mount = filesystems[type]:new(process, src, options or {})
-    mounts[p] = mount
+    if options and options.overlay then mounts[p][#mounts[p]+1] = mount
+    else mounts[p] = {mount} end
 end
 
 --- Unmounts a filesystem at a mountpoint.
@@ -1661,11 +1711,13 @@ function filesystem.unmount(process, path)
     expect(1, path, "string")
     path = getRealPath(process, path)
     if not mounts[path] then error(path .. ": No such mount", 2) end
-    local stat = mounts[path]:stat(process, "")
+    local last = #mounts[path]
+    local stat = mounts[path][last]:stat(process, "")
     if not stat then error("Internal error in unmount: could not get stat for root! Please report this to the maintainer of the target filesystem.", 2)
     elseif process.user ~= "root" and not (stat.permissions[process.user] or stat.worldPermissions).write then error(path .. ": Permission denied", 2) end
-    if mounts[path].unmount then mounts[path]:unmount(process) end
-    mounts[path] = nil
+    if mounts[path][last].unmount then mounts[path][last]:unmount(process) end
+    mounts[path][last] = nil
+    if last == 1 then mounts[path] = nil end
 end
 
 function filesystem.mountlist(process)
@@ -1673,8 +1725,10 @@ function filesystem.mountlist(process)
     local retval = {}
     for k, v in pairs(mounts) do
         if "/" .. k .. "/" == process.root or k:find(process.root:sub(2), 1, true) == 1 then
-            local type, path, options = v:info()
-            retval[#retval+1] = {path = "/" .. k, type = type, source = path, options = options}
+            for _, mount in ipairs(v) do
+                local type, path, options = mount:info()
+                retval[#retval+1] = {path = "/" .. k, type = type, source = path, options = options}
+            end
         end
     end
     return retval
@@ -1762,8 +1816,8 @@ xpcall(function()
             local root = _G[args.initrd:match "^_G%.(.+)"]
             if type(root) ~= "table" then error("Requested root filesystem in global '" .. args.initrd .. "' is not a table") end
             root.src = args.initrd
-            mounts[""] = setmetatable(root, {__index = filesystems.tablefs})
-        else mounts[""] = filesystems.tablefs:new(KERNEL, args.initrd, {}) end
+            mounts[""] = {setmetatable(root, {__index = filesystems.tablefs})}
+        else mounts[""] = {filesystems.tablefs:new(KERNEL, args.initrd, {})} end
     else
         local options = {}
         if args.rootflags then
@@ -1776,6 +1830,6 @@ xpcall(function()
                 else options[m] = true end
             end
         end
-        mounts[""] = filesystems[args.rootfstype]:new(KERNEL, args.root, options)
+        mounts[""] = {filesystems[args.rootfstype]:new(KERNEL, args.root, options)}
     end
 end, panic)

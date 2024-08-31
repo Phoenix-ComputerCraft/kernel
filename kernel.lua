@@ -1,11 +1,11 @@
--- Phoenix Kernel v0.0.6
+-- Phoenix Kernel v0.0.7
 --
 -- Copyright (c) 2021-2024 JackMacWindows. All rights reserved.
 -- This is a PRE-RELEASE BUILD! Redistribution of this file is not permitted.
 -- See the Phoenix EULA (https://github.com/Phoenix-ComputerCraft/kernel/blob/master/LICENSE.md) for more information.
 
 --- Version number of Phoenix.
-PHOENIX_VERSION = "0.0.6"
+PHOENIX_VERSION = "0.0.7"
 --- Build string of Phoenix.
 PHOENIX_BUILD = "PRERELEASE NONFREE $BUILD_DATE$"
 
