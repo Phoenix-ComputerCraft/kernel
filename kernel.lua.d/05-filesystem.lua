@@ -1,8 +1,6 @@
 --- filesystem
 -- @section filesystem
 
-fs = fs -- silence global warnings
-
 --[[
     CraftOS mount metadata is stored in the following format: {
         meta = {

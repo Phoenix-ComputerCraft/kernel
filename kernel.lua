@@ -51,6 +51,8 @@ modules = {}
 eventHooks = {}
 -- Stores a list of functions to call before clean shutdown.
 shutdownHooks = {}
+-- Stores functions that are used for debug hooks.
+debugHooks = setmetatable({}, {__mode = "k"})
 
 -- Unique keys for certain internal uses.
 kSyscallYield = {}
@@ -62,8 +64,6 @@ process = {}
 filesystem = {}
 --- Terminal API
 terminal = {}
---- User API
-user = {}
 --- System logger API
 syslog = {}
 --- Hardware API

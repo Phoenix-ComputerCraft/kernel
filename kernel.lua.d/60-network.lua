@@ -152,9 +152,9 @@ function protocols.send.arp_reply(info, destination, destIP)
     })
 end
 
-function protocols.send.internet(info, destination, message)
+function protocols.send.internet(info, destination, message, ttl)
     expect(2, destination, "number")
-    local msg = {PhoenixNetworking = true, type = "internet", hopsLeft = 15, payload = message, destination = numberToIP(destination)}
+    local msg = {PhoenixNetworking = true, type = "internet", hopsLeft = ttl or 15, payload = message, destination = numberToIP(destination)}
     local id = randomString(32)
     msg.messageID = id
     --usedMessageIDs[id] = os.epoch "utc"
@@ -193,7 +193,7 @@ function protocols.send.internet(info, destination, message)
                     payload = msg
                 }) end
                 sent = true
-                for i, v in ipairs(eventHooks.timer) do if v == timer_func then table.remove(eventHooks.timer, i) break end end
+                for i, w in ipairs(eventHooks.timer) do if w == timer_func then table.remove(eventHooks.timer, i) break end end
                 for i, f in ipairs(waiting.arp) do if f == arp_reply then table.remove(waiting.arp, i) break end end
             end
         end
@@ -229,7 +229,7 @@ function protocols.send.internet(info, destination, message)
                     payload = msg
                 }) end
                 sent = true
-                for i, v in ipairs(eventHooks.timer) do if v == timer_func then table.remove(eventHooks.timer, i) break end end
+                for i, w in ipairs(eventHooks.timer) do if w == timer_func then table.remove(eventHooks.timer, i) break end end
             end
         end
         waiting.arp[#waiting.arp+1] = arp_reply
@@ -257,7 +257,7 @@ function protocols.send.internet(info, destination, message)
     end
 end
 
-function protocols.send.control(info, destination, type, err, packet)
+function protocols.send.control(info, destination, type, err, packet, ttl)
     expect(3, type, "string")
     expect(4, err, "string", "nil")
     return protocols.send.internet(info, destination, {
@@ -266,7 +266,7 @@ function protocols.send.control(info, destination, type, err, packet)
         messageType = type,
         error = err,
         payload = packet
-    })
+    }, ttl)
 end
 
 protocols.send.socket = {}
@@ -493,7 +493,11 @@ function protocols.recv.internet(info, message)
     expect.field(message, "payload", "table")
     if usedMessageIDs[expect.field(message, "messageID", "number", "string")] then return end
     usedMessageIDs[message.messageID] = os.epoch "utc"
-    if not ipconfig[info.device.uuid] or ipconfig[info.device.uuid].ip ~= dest then return end
+    if not ipconfig[info.device.uuid] or ipconfig[info.device.uuid].ip ~= dest then
+        local retval = false
+        for _, v in pairs(networkListeners) do retval = v(message) or retval end
+        return retval
+    end
     info.ipPacket = message
     assert(message.payload.PhoenixNetworking)
     expect.field(message.payload, "type", "string")
@@ -1392,15 +1396,16 @@ end
 
 local controlNames = {ping = true, pong = true, unreachable = true, timeout = true}
 
-function syscalls.netcontrol(process, thread, ip, typ, err)
+function syscalls.netcontrol(process, thread, ip, typ, err, ttl)
     if process.user ~= "root" then error("Permission denied") end
     expect(1, ip, "string", "number")
     expect(2, typ, "string")
     expect(3, err, "string", "nil")
+    expect(4, ttl, "number", "nil")
     if not controlNames[typ] then error("bad argument #2 (invalid option '" .. typ .. "')") end
     if type(ip) == "string" then ip = ipToNumber(ip)
     else ip = bit32.band(ip, 0xFFFFFFFF) end
-    protocols.send.control({process = process}, ip, typ, err)
+    protocols.send.control({process = process}, ip, typ, err, ttl)
 end
 
 function syscalls.netevent(process, thread, state)

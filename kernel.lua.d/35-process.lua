@@ -3,9 +3,11 @@ local thread_template = {
     id = 0,
     name = "",
     coro = coroutine.create(function() end),
+    coroStack = {},
     status = "starting",
     args = {"a", n = 1},
-    filter = function(process, thread, event) end
+    filter = function(process, thread, event) end,
+    paused = false
 }
 
 ---@class Process
@@ -23,6 +25,11 @@ local process_template = {
     stderr = TTY[1],
     cputime = 0.2,
     systime = 0.1,
+    debugging = false,
+    allowDebug = true,
+    debugger = nil,
+    breakpoints = {},
+    hookf = function() end,
     env = {},
     syscallyield = nil,
     eventQueue = {},
@@ -43,8 +50,14 @@ local function mkenv(process)
     return env
 end
 
-local function preempt_hook()
-    coroutine.yield("preempt", "test", 7)
+local coyield, corunning, debugHooks = coroutine.yield, coroutine.running, debugHooks
+local function preempt_hook(event, line)
+    if event == "count" then coyield("preempt") end
+    local h = debugHooks[corunning()]
+    if h then
+        if event == "count" and not h.count then return end
+        return h.func(event, line)
+    end
 end
 
 local process_loaders = {load}
@@ -203,6 +216,11 @@ function syscalls.fork(process, thread, func, name, ...)
         vars = deepcopy(process.vars),
         cputime = 0,
         systime = 0,
+        debugging = false,
+        allowDebug = true,
+        breakpoints = {},
+        hookf = preempt_hook,
+        quantum = args.quantum,
         syscallyield = nil,
         eventQueue = {},
         signalHandlers = {
@@ -243,6 +261,7 @@ function syscalls.fork(process, thread, func, name, ...)
             }
         }
     }
+    processes[id].threads[0].coroStack = {processes[id].threads[0].coro}
     processes[id].env = mkenv(processes[id])
     processes[id].globalMetatables = makeMetatables(processes[id].env)
     setfenv(func, processes[id].env)
@@ -260,7 +279,7 @@ function syscalls.fork(process, thread, func, name, ...)
         process.stderr.processList[#process.stderr.processList+1] = process.stderr.frontmostProcess
         process.stderr.frontmostProcess = processes[id]
     end
-    if args.preemptive then debug.sethook(processes[id].threads[0].coro, preempt_hook, "", args.quantum) end
+    if args.preemptive then debug.sethook(processes[id].threads[0].coro, preempt_hook, "", processes[id].quantum) end
     return id
 end
 
@@ -318,7 +337,8 @@ function syscalls.exec(process, thread, path, ...)
                 filter = nil,
             }
         }
-        if args.preemptive then debug.sethook(process.threads[0].coro, preempt_hook, "", args.quantum * 10^(process.nice / -10)) end
+        process.threads[0].coroStack = {process.threads[0].coro}
+        if args.preemptive then debug.sethook(process.threads[0].coro, process.hookf, process.debugging and "crl" or "", process.quantum) end
     end
     if discord and process.stdin and process.stdin.isTTY and process.stdin.frontmostProcess == process then discord("Phoenix", "Executing " .. process.name) end
 end
@@ -343,7 +363,8 @@ function syscalls.newthread(process, thread, func, ...)
         filter = nil,
     }
     setfenv(func, process.env)
-    if args.preemptive then debug.sethook(process.threads[id].coro, preempt_hook, "", args.quantum * 10^(process.nice / -10)) end
+    process.threads[id].coroStack = {process.threads[id].coro}
+    if args.preemptive then debug.sethook(process.threads[id].coro, process.hookf, process.debugging and "crl" or "", process.quantum) end
     return id
 end
 
@@ -398,6 +419,7 @@ function syscalls.getpinfo(process, thread, pid)
         id = v.id,
         name = v.name,
         status = v.status,
+        paused = v.pause or false,
     } end end
     return {
         id = p.id,
@@ -412,6 +434,8 @@ function syscalls.getpinfo(process, thread, pid)
         cputime = p.cputime or 0,
         systime = p.systime or 0,
         threads = threads,
+        allowDebug = p.allowDebug,
+        debugging = p.debugging,
     }
 end
 
@@ -431,5 +455,247 @@ function syscalls.nice(process, thread, level, pid)
     local target = pid and assert(processes[pid], "Invalid process ID") or process
     if target.user ~= process.user and process.user ~= "root" then error("Permission denied", 0) end
     target.nice = level
-    if args.preemptive then for _, t in pairs(target.threads) do debug.sethook(t.coro, preempt_hook, "", args.quantum * 10^(level / -10)) end end
+    target.quantum = args.quantum * 10^(level / -10)
+    if args.preemptive then for _, t in pairs(target.threads) do debug.sethook(t.coro, preempt_hook, "", target.quantum) end end
+end
+
+---@param process Process
+local function setDebugHook(process)
+    local str_find, next, debug_getinfo, getCurrentThread = string.find, next, debug.getinfo, getCurrentThread
+    local function hook(event, line)
+        if event == "count" then coyield("preempt") end
+        local info = debug_getinfo(2)
+        local thread = getCurrentThread()
+        for id, bp in next, process.breakpoints do
+            if bp.type == event or (bp.type == "call" and event == "tail call") then
+                local ok = bp.thread == nil or bp.thread == thread.id
+                if bp.filter then
+                    for k, v in next, bp.filter do
+                        if info[k] ~= v then
+                            ok = false
+                            break
+                        end
+                    end
+                end
+                if ok then
+                    bp.process.eventQueue[#bp.process.eventQueue+1] = {"debug_break", {process = process.id, thread = thread.id, breakpoint = id}}
+                    thread.paused = true
+                    coyield("preempt")
+                    break -- TODO: should we hit multiple breakpoints?
+                end
+            end
+        end
+        local h = debugHooks[corunning()]
+        if h then
+            if (event == "count" and not h.count) or
+                ((event == "call" or event == "tail call") and not str_find(h.mask, "c")) or
+                (event == "return" and not str_find(h.mask, "r")) or
+                (event == "line" and not str_find(h.mask, "l"))
+                then return end
+            return h.func(event, line)
+        end
+    end
+    setfenv(hook, process.env)
+    debug.protect(hook)
+    process.hookf = hook
+    for _, v in pairs(process.threads) do
+        for _, w in ipairs(v.coroStack) do
+            debug.sethook(w, hook, "clr", process.quantum)
+        end
+    end
+end
+
+local function unsetDebugHook(process)
+    for _, v in pairs(process.threads) do
+        v.paused = false
+        for _, w in ipairs(v.coroStack) do
+            local h = debugHooks[w]
+            debug.sethook(w, preempt_hook, h and h.mask or "", process.quantum)
+        end
+    end
+    process.hookf = preempt_hook
+end
+
+---@param process Process
+---@param thread Thread
+function syscalls.debug_enable(process, thread, pid, enabled)
+    expect(1, pid, "number", "nil")
+    expect(2, enabled, "boolean")
+    local p
+    if pid == process.id or pid == nil then
+        p = process
+        process.allowDebug = enabled
+    else
+        p = processes[pid]
+        if not p then error("No such process") end
+        if not p.allowDebug or (p.user ~= process.user and process.user ~= "root") then error("Permission denied") end
+    end
+    if p.debugging ~= enabled then
+        if enabled then setDebugHook(p)
+        else unsetDebugHook(p) end
+    end
+    p.debugging = enabled
+    if enabled and p ~= process then
+        p.debugger = process
+    end
+end
+
+---@param process Process
+---@param thread Thread
+function syscalls.debug_break(process, thread, pid, tid)
+    if pid == nil then
+        if not process.debugger or not processes[process.debugger.id] then return end
+        process.debugger.eventQueue[#process.debugger.eventQueue+1] = {"debug_break", {process = process.id, thread = thread.id}}
+        thread.paused = true
+        return
+    end
+    expect(1, pid, "number")
+    expect(2, tid, "number", "nil")
+    local p = processes[pid]
+    if not p then error("No such process") end
+    if p.user ~= process.user and process.user ~= "root" then error("Permission denied") end
+    if not p.debugging then error("Process does not have debugging enabled") end
+    if tid then
+        local t = p.threads[tid]
+        if not t then error("No such thread") end
+        if not t.paused then process.eventQueue[#process.eventQueue+1] = {"debug_break", {process = p.id, thread = t.id}} end
+        t.paused = true
+    else
+        for _, t in pairs(p.threads) do
+            if not t.paused then process.eventQueue[#process.eventQueue+1] = {"debug_break", {process = p.id, thread = t.id}} end
+            t.paused = true
+        end
+    end
+end
+
+---@param process Process
+---@param thread Thread
+function syscalls.debug_(process, thread, pid)
+    expect(1, pid, "number")
+    local p = processes[pid]
+    if not p then error("No such process") end
+    if p.user ~= process.user and process.user ~= "root" then error("Permission denied") end
+    if not p.debugging then error("Process does not have debugging enabled") end
+end
+
+---@param process Process
+---@param thread Thread
+function syscalls.debug_continue(process, thread, pid, tid)
+    expect(1, pid, "number")
+    expect(2, tid, "number", "nil")
+    local p = processes[pid]
+    if not p then error("No such process") end
+    if p.user ~= process.user and process.user ~= "root" then error("Permission denied") end
+    if not p.debugging then error("Process does not have debugging enabled") end
+    if tid then
+        local t = p.threads[tid]
+        if not t then error("No such thread") end
+        t.paused = false
+    else
+        for _, t in pairs(p.threads) do
+            t.paused = false
+        end
+    end
+end
+
+local breakpointTypes = {call = true, ["return"] = true, line = true, error = true, resume = true, yield = true}
+
+---@param process Process
+---@param thread Thread
+function syscalls.debug_setbreakpoint(process, thread, pid, tid, typ, filter)
+    expect(1, pid, "number")
+    expect(2, tid, "number", "nil")
+    expect(3, typ, "string", "number")
+    expect(4, filter, "table", "nil")
+    if type(typ) ~= "number" and not breakpointTypes[typ] then error("bad argument #3 (invalid option '" .. typ .. "')") end
+    local p = processes[pid]
+    if not p then error("No such process") end
+    if p.user ~= process.user and process.user ~= "root" then error("Permission denied") end
+    if not p.debugging then error("Process does not have debugging enabled") end
+    local id = #p.breakpoints+1
+    p.breakpoints[id] = {process = process, thread = tid, type = typ, filter = filter}
+    return id
+end
+
+---@param process Process
+---@param thread Thread
+function syscalls.debug_unsetbreakpoint(process, thread, pid, breakpoint)
+    expect(1, pid, "number")
+    expect(2, breakpoint, "number")
+    local p = processes[pid]
+    if not p then error("No such process") end
+    if p.user ~= process.user and process.user ~= "root" then error("Permission denied") end
+    if not p.debugging then error("Process does not have debugging enabled") end
+    p.breakpoints[breakpoint] = nil
+end
+
+---@param process Process
+---@param thread Thread
+function syscalls.debug_listbreakpoints(process, thread, pid)
+    expect(1, pid, "number")
+    local p = processes[pid]
+    if not p then error("No such process") end
+    if p.user ~= process.user and process.user ~= "root" then error("Permission denied") end
+    if not p.debugging then error("Process does not have debugging enabled") end
+    local retval = {}
+    for id, bp in pairs(p.breakpoints) do
+        retval[id] = {
+            type = bp.type,
+            thread = bp.thread
+        }
+        if bp.filter then for k, v in pairs(bp.filter) do retval[id][k] = v end end
+    end
+    return retval
+end
+
+-- TODO: coroutine stack?
+
+---@param process Process
+---@param thread Thread
+function syscalls.debug_getinfo(process, thread, pid, tid, level, what)
+    expect(1, pid, "number")
+    expect(2, tid, "number")
+    expect(3, level, "number")
+    expect(4, what, "string", "nil")
+    local p = processes[pid]
+    if not p then error("No such process") end
+    if p.user ~= process.user and process.user ~= "root" then error("Permission denied") end
+    if not p.debugging then error("Process does not have debugging enabled") end
+    local t = p.threads[tid]
+    if not t then error("No such thread") end
+    return debug.getinfo(t.coroStack[#t.coroStack], level, what)
+end
+
+---@param process Process
+---@param thread Thread
+function syscalls.debug_getlocal(process, thread, pid, tid, level, n)
+    expect(1, pid, "number")
+    expect(2, tid, "number")
+    expect(3, level, "number")
+    expect(4, n, "number")
+    local p = processes[pid]
+    if not p then error("No such process") end
+    if p.user ~= process.user and process.user ~= "root" then error("Permission denied") end
+    if not p.debugging then error("Process does not have debugging enabled") end
+    local t = p.threads[tid]
+    if not t then error("No such thread") end
+    return debug.getlocal(t.coroStack[#t.coroStack], level, n)
+end
+
+---@param process Process
+---@param thread Thread
+function syscalls.debug_getupvalue(process, thread, pid, tid, level, n)
+    expect(1, pid, "number")
+    expect(2, tid, "number")
+    expect(3, level, "number")
+    expect(4, n, "number")
+    local p = processes[pid]
+    if not p then error("No such process") end
+    if p.user ~= process.user and process.user ~= "root" then error("Permission denied") end
+    if not p.debugging then error("Process does not have debugging enabled") end
+    local t = p.threads[tid]
+    if not t then error("No such thread") end
+    local info = debug.getinfo(t.coroStack[#t.coroStack], level, "f")
+    if not info then error("bad argument #3 (level out of range)") end
+    return debug.getupvalue(info.func, n)
 end

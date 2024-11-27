@@ -786,6 +786,7 @@ function panic(message)
     term.setTextColor(2)
     term.write("panic: We are hanging here...")
     mainThread = nil
+    if _HEADLESS then os.shutdown(1) end
     while true do coroutine.yield() end
 end
 
@@ -822,6 +823,9 @@ end
 
 local procTime = pcall(os.epoch, "nano") and function() return os.epoch "nano" / 1000000 end or (ccemux and function() return ccemux.nanoTime() / 1000000 end or function() return os.epoch "utc" end)
 
+local currentThread
+function getCurrentThread() return currentThread end
+
 local empty_packed_table = {n = 0}
 --- Resumes a thread's coroutine, handling different yield types.
 -- @tparam Process process The process that owns the thread
@@ -833,6 +837,7 @@ local empty_packed_table = {n = 0}
 -- @treturn boolean Whether all threads (including this one) are waiting for an event
 function executeThread(process, thread, ev, dead, allWaiting)
     local args
+    if thread.paused then return false, allWaiting end
     if thread.status == "starting" then args = thread.args
     elseif thread.status == "syscall" then args = table.pack(table.unpack(thread.syscall_return, 3, thread.syscall_return.n))
     elseif thread.status == "preempt" then args = empty_packed_table
@@ -849,6 +854,7 @@ function executeThread(process, thread, ev, dead, allWaiting)
             thread.yielding = nil
         else
             --syslog.debug("Resuming thread", process.id, thread.id)
+            currentThread = thread
             local old = globalMetatables
             globalMetatables = process.globalMetatables
             updateGlobalMetatables()
@@ -858,6 +864,7 @@ function executeThread(process, thread, ev, dead, allWaiting)
             process.cputime = process.cputime + (procTime() - start) / 1000
             globalMetatables = old
             updateGlobalMetatables()
+            currentThread = nil
         end
         if params[2] == "secure_syscall" then params[2] = "syscall"
         elseif params[2] == "secure_event" then params[2] = nil end
@@ -972,6 +979,9 @@ for _,v in ipairs({...}) do
     elseif key == "silent" then args.loglevel = 5
     elseif key == "quiet" then args.loglevel = 3
     end
+end
+if _HEADLESS then
+    args.headless = true
 end
 
 local function minver(version)

@@ -156,6 +156,7 @@ end
 -- @tparam TTY tty The TTY to redraw
 -- @tparam boolean full Whether to draw the full screen, or just the changed regions
 function terminal.redraw(tty, full)
+    if _HEADLESS and tty == TTY[1] and not tty.isLocked then return end -- in headless mode, terminal.write draws directly
     if tty.process then tty.process.eventQueue[#tty.process.eventQueue+1] = {"tty_redraw", {id = tty.id}} return
     elseif currentTTY ~= tty and not tty.isMonitor then return end
     local term = tty.term
@@ -591,6 +592,7 @@ for i = 0x70, 0x7F do CSI[string.char(i)] = function(tty, params) end end
 -- @tparam TTY tty The TTY to write to
 -- @tparam string text The text to write
 function terminal.write(tty, text)
+    if _HEADLESS and tty == TTY[1] then return term.write(text) end
     local start, size = 1, 0
     local function commit(x)
         if size == 0 then
@@ -1005,7 +1007,7 @@ function terminal.openterm(tty, process)
         if math.abs(lines) >= size.width then
             for y = 1, size.height do buffer[y] = {(' '):rep(size.width), buffer.colors.fg:rep(size.width), buffer.colors.bg:rep(size.width)} end
         elseif lines > 0 then
-            for i = lines + 1, size.height do buffer[i - lines] = buffer[i] end
+            for i = lines + 1, size.height do buffer[i] = buffer[i - lines] end
             for i = size.height - lines + 1, size.height do buffer[i] = {(' '):rep(size.width), buffer.colors.fg:rep(size.width), buffer.colors.bg:rep(size.width)} end
         elseif lines < 0 then
             for i = 1, size.height + lines do buffer[i - lines] = buffer[i] end
@@ -1318,7 +1320,6 @@ function syscalls.mktty(process, thread, width, height)
         return do_syscall("__ttyevent", retval, event, param)
     end
     function retval.write(text)
-        tty.buffer = tty.buffer .. tostring(text)
         return do_syscall("__ttyevent", retval, "paste", tostring(text))
     end
     debug.protect(retval.sendEvent)

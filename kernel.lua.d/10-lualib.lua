@@ -141,18 +141,6 @@ function createLuaLib(process)
 
     G.math.random, G.math.randomseed = makeRandom()
 
-    -- Coroutines are also preempted, so we'll help out by automatically preempting the caller too.
-    -- NOTE: Do not intentionally yield a coroutine with a single `preempt` value! This will trigger
-    -- the preemption code here, making your coroutine not actually yield back to your program.
-    local oldresume = G.coroutine.resume
-    G.coroutine.resume = function(coro, ...)
-        local retval = table.pack(oldresume(coro, ...))
-        while retval.n >= 2 and retval[1] == true and (retval[2] == "preempt" or retval[2] == "secure_syscall" or retval[2] == "secure_event") do
-            retval = table.pack(oldresume(coro, coroutine.yield(table.unpack(retval, 2, retval.n))))
-        end
-        return table.unpack(retval, 1, retval.n)
-    end
-
     local stdin_buffer = ""
     local io_stdin = setmetatable({
         close = function() end,
@@ -516,7 +504,169 @@ function createLuaLib(process)
     }
 
     G.debug = deepcopy(debug) -- since debug is protected, we can pretty much just stick it in here and be alright
-    -- TODO: Restrict hook modification so programs can't arbitrarily disable preemption
+
+    local oldresume, yield, sethook, getinfo, getCurrentThread, tpack, tunpack, next, xpcall = coroutine.resume, coroutine.yield, debug.sethook, debug.getinfo, getCurrentThread, table.pack, table.unpack, next, xpcall
+    local hooks = debugHooks
+    -- Coroutines are also preempted, so we'll help out by automatically preempting the caller too.
+    -- NOTE: Do not intentionally yield a coroutine with a single `preempt` value! This will trigger
+    -- the preemption code here, making your coroutine not actually yield back to your program.
+    function G.coroutine.resume(coro, ...)
+        expect(1, coro, "thread")
+        local thread = getCurrentThread()
+        if process.debugging then
+            for id, bp in next, process.breakpoints do
+                if bp.type == "resume" and (bp.thread == nil or bp.thread == thread.id) then
+                    local ok = true
+                    if bp.filter then
+                        for k, v in next, bp.filter do
+                            if info[k] ~= v then
+                                ok = false
+                                break
+                            end
+                        end
+                    end
+                    if ok then
+                        bp.process.eventQueue[#bp.process.eventQueue+1] = {"debug_break", {process = process.id, thread = thread.id, breakpoint = id}}
+                        thread.paused = true
+                        yield("preempt")
+                    end
+                end
+            end
+        end
+        local top = #thread.coroStack+1
+        thread.coroStack[top] = coro
+        local retval = tpack(oldresume(coro, ...))
+        while retval.n >= 2 and retval[1] == true and (retval[2] == "preempt" or retval[2] == "secure_syscall" or retval[2] == "secure_event") do
+            retval = tpack(oldresume(coro, yield(tunpack(retval, 2, retval.n))))
+        end
+        if process.debugging and not retval[1] then
+            local info = getinfo(coro, 1)
+            for id, bp in next, process.breakpoints do
+                if bp.type == "error" and (bp.thread == nil or bp.thread == thread.id) then
+                    local ok = true
+                    if bp.filter then
+                        for k, v in next, bp.filter do
+                            if info[k] ~= v then
+                                ok = false
+                                break
+                            end
+                        end
+                    end
+                    if ok then
+                        bp.process.eventQueue[#bp.process.eventQueue+1] = {"debug_break", {process = process.id, thread = thread.id, breakpoint = id}}
+                        thread.paused = true
+                        yield("preempt")
+                    end
+                end
+            end
+        end
+        thread.coroStack[top] = nil
+        return tunpack(retval, 1, retval.n)
+    end
+    function G.coroutine.yield(a, b, ...)
+        if process.debugging then
+            local thread = getCurrentThread()
+            local info = getinfo(2)
+            for id, bp in next, process.breakpoints do
+                if bp.type == "syscall" and not (bp.filter and bp.filter.name and bp.filter.name ~= b) and (bp.thread == nil or bp.thread == thread.id) then
+                    bp.process.eventQueue[#bp.process.eventQueue+1] = {"debug_break", {process = process.id, thread = thread.id, breakpoint = id}}
+                    thread.paused = true
+                    yield("preempt")
+                elseif bp.type == "yield" and (bp.thread == nil or bp.thread == thread.id) then
+                    local ok = true
+                    if bp.filter then
+                        for k, v in next, bp.filter do
+                            if info[k] ~= v then
+                                ok = false
+                                break
+                            end
+                        end
+                    end
+                    if ok then
+                        bp.process.eventQueue[#bp.process.eventQueue+1] = {"debug_break", {process = process.id, thread = thread.id, breakpoint = id}}
+                        thread.paused = true
+                        yield("preempt")
+                    end
+                end
+            end
+        end
+        return yield(a, b, ...)
+    end
+    function G.debug.gethook(coro)
+        expect(1, coro, "thread", "nil")
+        coro = coro or coroutine.running()
+        local h = hooks[coro]
+        if not h then return nil end
+        return h.func, h.mask, h.count
+    end
+    function G.debug.sethook(coro, func, mask, count)
+        if type(coro) ~= "thread" then coro, func, mask, count = coroutine.running(), coro, func, mask end
+        expect(1, coro, "thread")
+        expect(2, func, "function", "nil")
+        if func then
+            expect(3, mask, "string")
+            expect(4, count, "number", "nil")
+            hooks[coro] = {func = func, mask = mask, count = count}
+            if not process.debugging then sethook(coro, process.hookf, mask, process.quantum) end
+        else
+            hooks[coro] = nil
+            if not process.debugging then sethook(coro, process.hookf, "", process.quantum) end
+        end
+    end
+    function G.pcall(f, ...)
+        return xpcall(f, function(err)
+            if process.debugging then
+                local thread = getCurrentThread()
+                local info = getinfo(2)
+                for id, bp in next, process.breakpoints do
+                    if bp.type == "error" and (bp.thread == nil or bp.thread == thread.id) then
+                        local ok = true
+                        if bp.filter then
+                            for k, v in next, bp.filter do
+                                if info[k] ~= v then
+                                    ok = false
+                                    break
+                                end
+                            end
+                        end
+                        if ok then
+                            bp.process.eventQueue[#bp.process.eventQueue+1] = {"debug_break", {process = process.id, thread = thread.id, breakpoint = id, error = err}}
+                            thread.paused = true
+                            yield("preempt")
+                        end
+                    end
+                end
+            end
+            return err
+        end, ...)
+    end
+    function G.xpcall(f, errf, ...)
+        return xpcall(f, function(err)
+            if process.debugging then
+                local thread = getCurrentThread()
+                local info = getinfo(2)
+                for id, bp in next, process.breakpoints do
+                    if bp.type == "error" and (bp.thread == nil or bp.thread == thread.id) then
+                        local ok = true
+                        if bp.filter then
+                            for k, v in next, bp.filter do
+                                if info[k] ~= v then
+                                    ok = false
+                                    break
+                                end
+                            end
+                        end
+                        if ok then
+                            bp.process.eventQueue[#bp.process.eventQueue+1] = {"debug_break", {process = process.id, thread = thread.id, breakpoint = id, error = err}}
+                            thread.paused = true
+                            yield("preempt")
+                        end
+                    end
+                end
+            end
+            return errf(err)
+        end, ...)
+    end
 
     createRequire(process, G)
 

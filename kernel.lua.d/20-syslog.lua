@@ -298,6 +298,7 @@ function panic(message)
         terminal.redraw(TTY[1], true)
         term.setCursorBlink(false)
         mainThread = nil
+        if _HEADLESS then os.shutdown(1) end
         while true do coroutine.yield() end
     end, function(m)
         oldpanic(message .. "; and an error occurred while logging the error: " .. m)

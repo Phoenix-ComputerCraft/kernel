@@ -163,14 +163,14 @@ end
 
 function drivers.root.methods:turnOn(process) end -- do nothing
 
-function drivers.root.methods:shutdown(process)
+function drivers.root.methods:shutdown(process, retval)
     if process.user ~= "root" then error("Permission denied", 2) end
     syslog.log("System is shutting down.")
     function postkill()
         hardware.deregister(deviceTreeRoot, drivers.root)
         syslog.log("Halting system")
         for _, v in ipairs(shutdownHooks) do v() end
-        os.shutdown()
+        os.shutdown(retval)
         mainThread = nil
         while true do coroutine.yield() end
     end
@@ -734,6 +734,56 @@ end
 register "printer"
 
 --#endregion
+--#region Redstone relay peripheral
+
+local peripheral_redstone_relay_side = {
+    name = "peripheral_redstone_relay_side",
+    type = "redstone",
+    properties = {
+        "input",
+        "output",
+        "bundledInput",
+        "bundledOutput"
+    },
+    methods = {}
+}
+
+function peripheral_redstone_relay_side.methods:getInput() return zeronil(self.internalState.peripheral.call(self.id, "getAnalogInput", self.internalState.redstone.side)) end
+function peripheral_redstone_relay_side.methods:getOutput() return zeronil(self.internalState.peripheral.call(self.id, "getAnalogOutput", self.internalState.redstone.side)) end
+function peripheral_redstone_relay_side.methods:setOutput(process, n)
+    n = expect(1, n, "number", "boolean", "nil") or 0
+    if n == false then n = 0
+    elseif n == true then n = 15 end
+    expect.range(n, 0, 15)
+    self.internalState.peripheral.call(self.id, "setAnalogOutput", self.internalState.redstone.side, n)
+end
+function peripheral_redstone_relay_side.methods:getBundledInput() return self.internalState.peripheral.call(self.id, "getBundledInput", self.internalState.redstone.side) end
+function peripheral_redstone_relay_side.methods:getBundledOutput() return self.internalState.peripheral.call(self.id, "getBundledOutput", self.internalState.redstone.side) end
+function peripheral_redstone_relay_side.methods:setBundledOutput(process, n) expect(1, n, "number") expect.range(n, 0, 65535) return self.internalState.peripheral.call(self.id, "setBundledOnput", self.internalState.redstone.side, n) end
+
+function peripheral_redstone_relay_side:init()
+    if not self.internalState.redstone or not self.internalState.redstone.side then error("No assigned side on redstone device!", 2) end
+    self.displayName = "Redstone Relay '" .. self.id .. "' on side " .. self.internalState.redstone.side
+end
+
+drivers.peripheral_redstone_relay = {
+    name = "peripheral_redstone_relay",
+    type = "redstone_relay",
+    properties = {},
+    methods = {}
+}
+
+function drivers.peripheral_redstone_relay:init()
+    for _, v in ipairs{"top", "bottom", "left", "right", "front", "back"} do
+        local d = hardware.add(self, v)
+        d.internalState.redstone = {side = v}
+        hardware.register(d, peripheral_redstone_relay_side)
+    end
+end
+
+register "redstone_relay"
+
+--#endregion
 --#region Speaker peripheral
 
 drivers.peripheral_speaker = {
@@ -809,7 +859,7 @@ function registerDriver(driver)
     driver.__callback = peripheralTypeCallback(driver, driver.type)
     hardware.listen(driver.__callback, deviceTreeRoot)
     peripheralDrivers[#peripheralDrivers+1] = driver
-    for _, node in ipairs(hardware.find("modem")) do
+    for _, node in ipairs{hardware.find("modem")} do
         if not node.metadata.wireless then
             hardware.listen(driver.__callback, node)
             node.internalState.modem.callbacks[#node.internalState.modem.callbacks+1] = f
@@ -822,9 +872,9 @@ end
 function deregisterDriver(driver)
     if not driver.__callback then return end
     hardware.unlisten(driver.__callback)
-    for _, v in ipairs(hardware.find(driver.type)) do hardware.deregister(v, driver) end
+    for _, v in ipairs{hardware.find(driver.type)} do hardware.deregister(v, driver) end
     for i, v in ipairs(localPeripherals) do if v == driver then table.remove(localPeripherals, i) break end end
-    for _, node in ipairs(hardware.find("modem")) do
+    for _, node in ipairs{hardware.find("modem")} do
         if not node.metadata.wireless then
             hardware.unlisten(driver.__callback)
             for i, v in ipairs(node.internalState.modem.callbacks) do if v == driver.__callback then table.remove(node.internalState.modem.callbacks, i) break end end
