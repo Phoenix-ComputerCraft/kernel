@@ -1406,6 +1406,7 @@ local function dofsevent(process, path, event, dir)
         local pp = rp
         if pp:find(v.root, 1, true) == 1 then pp = pp:sub(#v.root + 1) end
         v.eventQueue[#v.eventQueue+1] = {"fsevent", {path = pp, event = event, name = dir and fs.getName(rp) or nil, process = process.id}}
+        wakeup(v)
     end end
 end
 

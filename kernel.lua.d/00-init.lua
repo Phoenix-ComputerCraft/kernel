@@ -927,6 +927,7 @@ mainThread = coroutine.running()
 function userModeCallback(process, func, ...)
     local id = syscalls.newthread(process, nil, func, ...)
     local thread = process.threads[id]
+    thread.name = "<user mode callback>"
     while thread.status ~= "dead" do
         --syslog.log({level = "debug", process = process.id, thread = id}, debug.traceback("Waiting on user mode callback"))
         if coroutine.running() == mainThread then error("userModeCallback not called from a yieldable context", 2) end

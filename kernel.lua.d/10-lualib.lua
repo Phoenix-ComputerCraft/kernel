@@ -505,7 +505,7 @@ function createLuaLib(process)
 
     G.debug = deepcopy(debug) -- since debug is protected, we can pretty much just stick it in here and be alright
 
-    local oldresume, yield, sethook, getinfo, getCurrentThread, tpack, tunpack, next, xpcall = coroutine.resume, coroutine.yield, debug.sethook, debug.getinfo, getCurrentThread, table.pack, table.unpack, next, xpcall
+    local oldresume, yield, sethook, getinfo, getCurrentThread, tpack, tunpack, next, xpcall, wakeup = coroutine.resume, coroutine.yield, debug.sethook, debug.getinfo, getCurrentThread, table.pack, table.unpack, next, xpcall, wakeup
     local hooks = debugHooks
     -- Coroutines are also preempted, so we'll help out by automatically preempting the caller too.
     -- NOTE: Do not intentionally yield a coroutine with a single `preempt` value! This will trigger
@@ -527,6 +527,7 @@ function createLuaLib(process)
                     end
                     if ok then
                         bp.process.eventQueue[#bp.process.eventQueue+1] = {"debug_break", {process = process.id, thread = thread.id, breakpoint = id}}
+                        wakeup(bp.process)
                         thread.paused = true
                         yield("preempt")
                     end
@@ -554,6 +555,7 @@ function createLuaLib(process)
                     end
                     if ok then
                         bp.process.eventQueue[#bp.process.eventQueue+1] = {"debug_break", {process = process.id, thread = thread.id, breakpoint = id}}
+                        wakeup(bp.process)
                         thread.paused = true
                         yield("preempt")
                     end
@@ -570,6 +572,7 @@ function createLuaLib(process)
             for id, bp in next, process.breakpoints do
                 if bp.type == "syscall" and not (bp.filter and bp.filter.name and bp.filter.name ~= b) and (bp.thread == nil or bp.thread == thread.id) then
                     bp.process.eventQueue[#bp.process.eventQueue+1] = {"debug_break", {process = process.id, thread = thread.id, breakpoint = id}}
+                    wakeup(bp.process)
                     thread.paused = true
                     yield("preempt")
                 elseif bp.type == "yield" and (bp.thread == nil or bp.thread == thread.id) then
@@ -584,6 +587,7 @@ function createLuaLib(process)
                     end
                     if ok then
                         bp.process.eventQueue[#bp.process.eventQueue+1] = {"debug_break", {process = process.id, thread = thread.id, breakpoint = id}}
+                        wakeup(bp.process)
                         thread.paused = true
                         yield("preempt")
                     end
@@ -631,6 +635,7 @@ function createLuaLib(process)
                         end
                         if ok then
                             bp.process.eventQueue[#bp.process.eventQueue+1] = {"debug_break", {process = process.id, thread = thread.id, breakpoint = id, error = err}}
+                            wakeup(bp.process)
                             thread.paused = true
                             yield("preempt")
                         end
@@ -658,6 +663,7 @@ function createLuaLib(process)
                         end
                         if ok then
                             bp.process.eventQueue[#bp.process.eventQueue+1] = {"debug_break", {process = process.id, thread = thread.id, breakpoint = id, error = err}}
+                            wakeup(bp.process)
                             thread.paused = true
                             yield("preempt")
                         end

@@ -261,7 +261,7 @@ function hardware.broadcast(node, event, param)
     expect(3, param, "table")
     expect.field(node, "uuid", "string")
     if not deviceUUIDs[node.uuid] then error("bad argument #1 (invalid node)", 2) end
-    for v in pairs(node.listeners) do v.eventQueue[#v.eventQueue+1] = {event, param} end
+    for v in pairs(node.listeners) do v.eventQueue[#v.eventQueue+1] = {event, param} wakeup(v) end
 end
 
 --- Calls a method on a device.

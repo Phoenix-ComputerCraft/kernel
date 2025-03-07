@@ -126,6 +126,7 @@ local function killall()
             process.isDead = true
             if process.parent ~= 0 and processes[process.parent] then
                 processes[process.parent].eventQueue[#processes[process.parent].eventQueue+1] = {"process_complete", process.lastReturnValue}
+                wakeup(processes[process.parent])
             end
             reap_process(process)
             processes[pid] = nil
@@ -968,7 +969,7 @@ eventHooks.modem_message[#eventHooks.modem_message+1] = function(ev)
         return
     end
     local retval = false
-    for v in pairs(node.listeners) do if (node.internalState.modem[ev[3]] or {})[v] then v.eventQueue[#v.eventQueue+1], retval = {"modem_message", {device = hardware.path(node), channel = ev[3], replyChannel = ev[4], message = ev[5], distance = ev[6]}}, true end end
+    for v in pairs(node.listeners) do if (node.internalState.modem[ev[3]] or {})[v] then v.eventQueue[#v.eventQueue+1], retval = {"modem_message", {device = hardware.path(node), channel = ev[3], replyChannel = ev[4], message = ev[5], distance = ev[6]}}, true wakeup(v) end end
     return retval
 end
 

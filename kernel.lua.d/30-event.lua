@@ -35,7 +35,8 @@ function killProcess(pid, signal)
         if processes[target.parent] then syscalls.queueEvent(processes[target.parent], nil, "process_complete", {id = pid, result = 9}) end
         processes[pid] = nil
     elseif target.signalHandlers[signal] then
-        syscalls.newthread(target, nil, target.signalHandlers[signal], signal)
+        local id = syscalls.newthread(target, nil, target.signalHandlers[signal], signal)
+        target.threads[id].name = "<signal handler:" .. signal .. ">"
     else
         syscalls.queueEvent(target, nil, "signal", {signal = signal})
     end
@@ -59,7 +60,16 @@ function syscalls.sendEvent(process, thread, pid, name, params)
     local target = processes[pid]
     if not target then return false end
     target.eventQueue[#target.eventQueue+1] = {"remote_event", {type = name, sender = process.id, data = params}}
+    wakeup(target)
     return true
+end
+
+function syscalls.peekEvent(process, thread)
+    local ev = process.eventQueue[#process.eventQueue]
+    if not ev then return nil end
+    local args = {}
+    for k, v in pairs(ev[2]) do args[k] = v end
+    return ev[1], args
 end
 
 function syscalls.register(process, thread, name)

@@ -622,7 +622,8 @@ function terminal.write(tty, text)
         if state == 0 then
             if c == '\a' then
                 commit(n)
-                -- TODO: make a sound or something
+                local spk = hardware.find("speaker")
+                if spk then hardware.call(spk, "playNote", "pling") end
             elseif c == '\b' then
                 commit(n)
                 if tty.cursor.x == 1 then
@@ -1395,6 +1396,30 @@ function syscalls.__ttyevent(process, thread, usertty, event, param)
         -- TODO: buttonMask
         tty.frontmostProcess.eventQueue[#tty.frontmostProcess.eventQueue+1] = {event, {x = param.x, y = param.y, button = param.direction}}
     else error("Invalid event") end
+    wakeup(tty.frontmostProcess)
+end
+
+function syscalls.capture(process, thread)
+    local handle = process.stdin
+    if not handle or not handle.isTTY then return end
+    handle.processList[#handle.processList+1] = handle.frontmostProcess
+    handle.frontmostProcess = process
+end
+
+function syscalls.release(process, thread)
+    local handle = process.stdin
+    if not handle or not handle.isTTY then return end
+    if handle.frontmostProcess == process then
+        handle.frontmostProcess = table.remove(handle.processList)
+    else
+        local found = nil
+        for i = #handle.processList, 1, -1 do
+            if handle.processList[i] == process then
+                if found then table.remove(handle.processList, found) break
+                else found = i end
+            end
+        end
+    end
 end
 
 function syscalls.stdin(process, thread, handle)

@@ -22,6 +22,8 @@ if not init_ok then
 end
 syslog.log("Starting init from " .. processes[init_pid].name)
 local allWaiting = false
+local executed = setmetatable({}, {__mode = "k"})
+function wakeup(process) if #process.eventQueue > 0 and not executed[process] then allWaiting = false end end
 
 local yield = coroutine.yield
 function coroutine.yield(...)
@@ -133,6 +135,9 @@ while processes[init_pid] do
                 params.altHeld = keysHeld.alt
                 params.shiftHeld = keysHeld.shift
             end
+            if name == "mouse_scroll" then
+                params.direction = params.direction > 0
+            end
             if ttyEvents[name] and currentTTY.frontmostProcess then
                 currentTTY.frontmostProcess.eventQueue[#currentTTY.frontmostProcess.eventQueue+1] = {name, params}
                 pushedEvent = true
@@ -147,6 +152,7 @@ while processes[init_pid] do
         if allWaiting and pushedEvent then break end
     end
     allWaiting = true
+    executed = setmetatable({}, {__mode = "k"})
     for pid, process in pairs(processes) do if pid ~= 0 and not process.paused then
         local gotev, ev = false, nil
         local dead = true
@@ -175,6 +181,7 @@ while processes[init_pid] do
             processes[pid] = nil
             allWaiting = false
         end
+        executed[process] = true
     end end
     --if processes[init_pid].paused then panic("init program paused") end
     terminal.redraw(currentTTY)

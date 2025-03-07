@@ -214,6 +214,7 @@ function syscalls.rmlog(process, thread, name)
     if syslogs[name].stream then for _,v in pairs(syslogs[name].stream) do
         processes[v.pid].eventQueue[#processes[v.pid].eventQueue+1] = {"syslog_close", {id = v.id}}
         processes[v.pid].dependents[v.id] = nil
+        wakeup(processes[v.pid])
     end end
     syslogs[name] = nil
 end

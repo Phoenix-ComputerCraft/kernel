@@ -38,7 +38,8 @@ local process_template = {
     nice = 0,
     threads = {
         [0] = thread_template
-    }
+    },
+    globalMetatables = {},
 }
 
 local nextProcessID = 1
@@ -209,6 +210,7 @@ function syscalls.fork(process, thread, func, name, ...)
         dependents = {},
         parent = process.id,
         dir = process.dir,
+        env = nil,
         root = process.root,
         stdin = process.stdin,
         stdout = process.stdout,
@@ -223,6 +225,7 @@ function syscalls.fork(process, thread, func, name, ...)
         quantum = args.quantum,
         syscallyield = nil,
         eventQueue = {},
+        globalMetatables = nil,
         signalHandlers = {
             [1] = function() return coroutine.yield("syscall", "exit", 1) end,
             [2] = function() return coroutine.yield("syscall", "exit", 1) end,
@@ -258,6 +261,8 @@ function syscalls.fork(process, thread, func, name, ...)
                 status = "starting",
                 args = table.pack(...),
                 filter = nil,
+                coroStack = nil,
+                paused = false,
             }
         }
     }
@@ -301,7 +306,7 @@ function syscalls.exec(process, thread, path, ...)
         contents = file.readAll()
         file.close()
     end
-    local stat = filesystem.stat(process, path)
+    local stat = assert(filesystem.stat(process, path))
     if not (stat.permissions[stat.owner] or stat.worldPermissions).execute then error("Could not execute file: Permission denied", 0) end
     if stat.setuser then process.realuser, process.user = process.user, stat.owner end
     if contents:sub(1, 2) == "#!" then
@@ -361,6 +366,8 @@ function syscalls.newthread(process, thread, func, ...)
         status = "starting",
         args = table.pack(...),
         filter = nil,
+        coroStack = nil,
+        paused = false,
     }
     setfenv(func, process.env)
     process.threads[id].coroStack = {process.threads[id].coro}
@@ -461,7 +468,7 @@ end
 
 ---@param process Process
 local function setDebugHook(process)
-    local str_find, next, debug_getinfo, getCurrentThread = string.find, next, debug.getinfo, getCurrentThread
+    local str_find, next, debug_getinfo, getCurrentThread, wakeup = string.find, next, debug.getinfo, getCurrentThread, wakeup
     local function hook(event, line)
         if event == "count" then coyield("preempt") end
         local info = debug_getinfo(2)
@@ -479,11 +486,26 @@ local function setDebugHook(process)
                 end
                 if ok then
                     bp.process.eventQueue[#bp.process.eventQueue+1] = {"debug_break", {process = process.id, thread = thread.id, breakpoint = id}}
+                    wakeup(bp.process)
                     thread.paused = true
                     coyield("preempt")
                     break -- TODO: should we hit multiple breakpoints?
                 end
             end
+        end
+        while thread.pendingExec do
+            local res = table.pack(pcall(thread.pendingExec))
+            res.ok = table.remove(res, 1)
+            res.n = res.n - 1
+            if not res.ok then res.error = res[1] end
+            res.process = process.id
+            res.thread = thread.id
+            local eq = thread.pendingExecProcess.eventQueue
+            eq[#eq+1] = {"debug_exec_result", res}
+            wakeup(thread.pendingExecProcess)
+            thread.pendingExec, thread.pendingExecProcess = nil
+            thread.paused = true
+            coyield("preempt")
         end
         local h = debugHooks[corunning()]
         if h then
@@ -546,6 +568,7 @@ function syscalls.debug_break(process, thread, pid, tid)
     if pid == nil then
         if not process.debugger or not processes[process.debugger.id] then return end
         process.debugger.eventQueue[#process.debugger.eventQueue+1] = {"debug_break", {process = process.id, thread = thread.id}}
+        wakeup(process.debugger)
         thread.paused = true
         return
     end
@@ -698,4 +721,23 @@ function syscalls.debug_getupvalue(process, thread, pid, tid, level, n)
     local info = debug.getinfo(t.coroStack[#t.coroStack], level, "f")
     if not info then error("bad argument #3 (level out of range)") end
     return debug.getupvalue(info.func, n)
+end
+
+---@param process Process
+---@param thread Thread
+function syscalls.debug_exec(process, thread, pid, tid, fn)
+    expect(1, pid, "number")
+    expect(2, tid, "number")
+    expect(3, fn, "function")
+    local p = processes[pid]
+    if not p then error("No such process") end
+    if p.user ~= process.user and process.user ~= "root" then error("Permission denied") end
+    if not p.debugging then error("Process does not have debugging enabled") end
+    local t = p.threads[tid]
+    if not t then error("No such thread") end
+    if not t.paused then error("Thread is not paused") end
+    setfenv(fn, p.env)
+    t.pendingExec = fn
+    t.pendingExecProcess = process
+    t.paused = false
 end
