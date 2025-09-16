@@ -61,7 +61,7 @@ local function preempt_hook(event, line)
     end
 end
 
-local process_loaders = {load}
+local process_loaders = {function(c, ...) return load(c:gsub("^#![^\n]+\n", ""), ...) end}
 
 --- Adds a loader function to the list of loaders. These are used by exec(2) to
 --- load a file into a function.
@@ -225,7 +225,7 @@ function syscalls.fork(process, thread, func, name, ...)
         quantum = args.quantum,
         syscallyield = nil,
         eventQueue = {},
-        globalMetatables = nil,
+        globalMetatables = {},
         signalHandlers = {
             [1] = function() return coroutine.yield("syscall", "exit", 1) end,
             [2] = function() return coroutine.yield("syscall", "exit", 1) end,
@@ -266,6 +266,13 @@ function syscalls.fork(process, thread, func, name, ...)
             }
         }
     }
+    -- reset stdio handles if they have arbitrary code
+    -- TODO: is this necessary? it breaks pipes
+    --[[
+    if process.stdin and not process.stdin.isTTY then processes[id].stdin = nil end
+    if process.stdout and not process.stdout.isTTY then processes[id].stdout = nil end
+    if process.stderr and not process.stderr.isTTY then processes[id].stderr = nil end
+    --]]
     processes[id].threads[0].coroStack = {processes[id].threads[0].coro}
     processes[id].env = mkenv(processes[id])
     processes[id].globalMetatables = makeMetatables(processes[id].env)
@@ -308,8 +315,15 @@ function syscalls.exec(process, thread, path, ...)
     end
     local stat = assert(filesystem.stat(process, path))
     if not (stat.permissions[stat.owner] or stat.worldPermissions).execute then error("Could not execute file: Permission denied", 0) end
-    if stat.setuser then process.realuser, process.user = process.user, stat.owner end
-    if contents:sub(1, 2) == "#!" then
+    if stat.setuser then
+        process.env = createLuaLib(process) -- reset environment to prevent injection
+        -- reset stdio handles if they have arbitrary code
+        if process.stdin and not process.stdin.isTTY then process.stdin = nil end
+        if process.stdout and not process.stdout.isTTY then process.stdout = nil end
+        if process.stderr and not process.stderr.isTTY then process.stderr = nil end
+        process.realuser, process.user = process.user, stat.owner
+    end
+    if contents:sub(1, 2) == "#!" and not (contents:match "^#!/bin/lua" or contents:match "^#!/usr/bin/lua" or contents:match "^#!/usr/bin/env lua") then -- Lua shebangs should be loaded as-is
         local command = contents:sub(3, contents:find("\n") - 1)
         local args, i = {}, 0
         for s in command:gmatch "%S+" do args[i] = s i=i+1 end
@@ -591,6 +605,7 @@ function syscalls.debug_break(process, thread, pid, tid)
     end
 end
 
+--[[
 ---@param process Process
 ---@param thread Thread
 function syscalls.debug_(process, thread, pid)
@@ -600,6 +615,7 @@ function syscalls.debug_(process, thread, pid)
     if p.user ~= process.user and process.user ~= "root" then error("Permission denied") end
     if not p.debugging then error("Process does not have debugging enabled") end
 end
+]]
 
 ---@param process Process
 ---@param thread Thread

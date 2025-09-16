@@ -268,6 +268,7 @@ function terminal.resize(tty, width, height)
         end
     end
     tty.size.width = width
+    if tty.cursor.x > width then tty.cursor.x = width end
 
     if height > tty.size.height then
         for y = tty.size.height + 1, height do
@@ -309,6 +310,7 @@ function terminal.resize(tty, width, height)
         end
     end
     tty.size.height = height
+    if tty.cursor.y > height then tty.cursor.y = height end
 end
 
 local function nextline(tty)
@@ -382,13 +384,13 @@ local CSI = {
     C = function(tty, params)
         local p = params[1] or 1
         if p == 0 then p = 1 end
-        tty.cursor.y = tty.cursor.y + math.floor((tty.cursor.x - 1 + p) / tty.size.width)
+        tty.cursor.y = math.min(math.max(tty.cursor.y + math.floor((tty.cursor.x - 1 + p) / tty.size.width), 1), tty.size.height)
         tty.cursor.x = (tty.cursor.x - 1 + p) % tty.size.width + 1
     end, -- CUF
     D = function(tty, params)
         local p = params[1] or 1
         if p == 0 then p = 1 end
-        tty.cursor.y = tty.cursor.y + math.floor((tty.cursor.x - 1 - p) / tty.size.width)
+        tty.cursor.y = math.min(math.max(tty.cursor.y + math.floor((tty.cursor.x - 1 - p) / tty.size.width), 1), tty.size.height)
         tty.cursor.x = (tty.cursor.x - 1 - p) % tty.size.width + 1
     end, -- CUB
     E = function(tty, params)
@@ -755,7 +757,7 @@ function syscalls.write(process, thread, ...)
     local args = table.pack(...)
     for i = 1, args.n do
         if i > 1 then write("\t") end
-        write(tostring(args[i]))
+        write(tostring(args[i])) -- TODO: avoid __tostring injection
     end
     if process.stdout.isTTY then terminal.redraw(process.stdout) end
 end
@@ -773,7 +775,7 @@ function syscalls.writeerr(process, thread, ...)
     local args = table.pack(...)
     for i = 1, args.n do
         if i > 1 then write("\t") end
-        write(tostring(args[i]))
+        write(tostring(args[i])) -- TODO: avoid __tostring injection
     end
     if process.stderr.isTTY then terminal.redraw(process.stderr) end
 end
@@ -1442,14 +1444,14 @@ function syscalls.stdin(process, thread, handle)
         if not node then error("bad argument #1 (no such device)", 2) end
         if not node.internalState.tty then error("bad argument #1 (no TTY available on device)", 2) end
         handle = node.internalState.tty
-        if process.stdin.frontmostProcess == process then
+        if process.stdin and process.stdin.frontmostProcess == process then
             process.stdin.frontmostProcess = table.remove(process.stdin.processList)
             handle.processList[#handle.processList+1] = handle.frontmostProcess
             handle.frontmostProcess = process
         end
         process.stdin = handle
     elseif handle == nil then
-        if process.stdin.frontmostProcess == process then
+        if process.stdin and process.stdin.frontmostProcess == process then
             process.stdin.frontmostProcess = table.remove(process.stdin.processList)
         end
         process.stdin = nil
@@ -1457,7 +1459,7 @@ function syscalls.stdin(process, thread, handle)
         if handle.isTTY then
             handle = terminal.userTTYs[handle]
             if not handle then error("bad argument #1 (invalid TTY)", 2) end
-            if process.stdin.frontmostProcess == process then
+            if process.stdin and process.stdin.frontmostProcess == process then
                 process.stdin.frontmostProcess = table.remove(process.stdin.processList)
                 handle.processList[#handle.processList+1] = handle.frontmostProcess
                 handle.frontmostProcess = process
@@ -1498,7 +1500,7 @@ function syscalls.stdout(process, thread, handle)
         if not node then error("bad argument #1 (no such device)", 2) end
         if not node.internalState.tty then error("bad argument #1 (no TTY available on device)", 2) end
         handle = node.internalState.tty
-        if process.stdout.frontmostProcess == process then
+        if process.stdout and process.stdout.frontmostProcess == process then
             process.stdout.frontmostProcess = table.remove(process.stdout.processList)
             handle.processList[#handle.processList+1] = handle.frontmostProcess
             handle.frontmostProcess = process
@@ -1506,7 +1508,7 @@ function syscalls.stdout(process, thread, handle)
         end
         process.stdout = handle
     elseif handle == nil then
-        if process.stdout.frontmostProcess == process then
+        if process.stdout and process.stdout.frontmostProcess == process then
             process.stdout.frontmostProcess = table.remove(process.stdout.processList)
             if discord and process.stdout == currentTTY then discord("Phoenix", "Executing " .. process.name) end
         end
@@ -1515,7 +1517,7 @@ function syscalls.stdout(process, thread, handle)
         if handle.isTTY then
             handle = terminal.userTTYs[handle]
             if not handle then error("bad argument #1 (invalid TTY)", 2) end
-            if process.stdout.frontmostProcess == process then
+            if process.stdout and process.stdout.frontmostProcess == process then
                 process.stdout.frontmostProcess = table.remove(process.stdout.processList)
                 handle.processList[#handle.processList+1] = handle.frontmostProcess
                 handle.frontmostProcess = process
@@ -1554,14 +1556,14 @@ function syscalls.stderr(process, thread, handle)
         if not node then error("bad argument #1 (no such device)", 2) end
         if not node.internalState.tty then error("bad argument #1 (no TTY available on device)", 2) end
         handle = node.internalState.tty
-        if process.stderr.frontmostProcess == process then
+        if process.stderr and process.stderr.frontmostProcess == process then
             process.stderr.frontmostProcess = table.remove(process.stderr.processList)
             handle.processList[#handle.processList+1] = handle.frontmostProcess
             handle.frontmostProcess = process
         end
         process.stderr = handle
     elseif handle == nil then
-        if process.stderr.frontmostProcess == process then
+        if process.stderr and process.stderr.frontmostProcess == process then
             process.stderr.frontmostProcess = table.remove(process.stderr.processList)
         end
         process.stderr = nil
@@ -1569,7 +1571,7 @@ function syscalls.stderr(process, thread, handle)
         if handle.isTTY then
             handle = terminal.userTTYs[handle]
             if not handle then error("bad argument #1 (invalid TTY)", 2) end
-            if process.stderr.frontmostProcess == process then
+            if process.stderr and process.stderr.frontmostProcess == process then
                 process.stderr.frontmostProcess = table.remove(process.stderr.processList)
                 handle.processList[#handle.processList+1] = handle.frontmostProcess
                 handle.frontmostProcess = process
@@ -1595,4 +1597,12 @@ end
 function syscalls.termsize(process, thread)
     if not process.stdout or not process.stdout.isTTY then return nil, nil end
     return process.stdout.size.width, process.stdout.size.height
+end
+
+function syscalls.chvt(process, thread, vt)
+    expect(1, vt, "number")
+    if not TTY[vt] then error("TTY out of range", 0) end
+    if process.user ~= "root" then error("Permission denied", 0) end
+    currentTTY = TTY[vt]
+    terminal.redraw(currentTTY, true)
 end

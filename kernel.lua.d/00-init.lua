@@ -1,47 +1,156 @@
--- Expect is a very useful module, so it's loaded for the kernel to use even though it's a CraftOS module.
-do
-    local file = fs.open("/rom/modules/main/cc/expect.lua", "r")
-    expect = (loadstring or load)(file.readAll(), "@/rom/modules/main/cc/expect.lua")()
-    file.close()
-    setmetatable(expect, {__call = function(self, ...) return self.expect(...) end})
-    if not expect.range then function expect.range(num, min, max)
-        expect(1, num, "number")
-        expect(2, min, "number", "nil")
-        expect(3, max, "number", "nil")
-        if max and min and max < min then error("bad argument #3 (min must be less than or equal to max)", 2) end
-        if num ~= num or num < (min or -math.huge) or num > (max or math.huge) then error(("number outside of range (expected %s to be within %s and %s)"):format(num, min or -math.huge, max or math.huge), 3) end
-        return num
-    end end
+--- The expect module provides error checking functions for other parts of the kernel.
+
+expect = {}
+
+local native_types = {["nil"] = true, boolean = true, number = true, string = true, table = true, ["function"] = true, userdata = true, thread = true}
+
+local function funclike(v) return (type(v) == "table" and ((getmetatable(v) or {}).__call)) or type(v) == "function" end
+
+local function check_type(msg, value, ...)
+    local vt = type(value)
+    local vmt
+    if vt == "table" then
+        local mt = getmetatable(value)
+        if mt then vmt = mt.__name end
+    end
+    local args = table.pack(...)
+    for _, typ in ipairs(args) do
+        if native_types[typ] then if vt == typ then return value end
+        elseif vmt == typ then return value
+        elseif funclike(typ) and typ(value) then return value end
+    end
+    local info = debug.getinfo(2, "n")
+    if info and info.name and info.name ~= "" then msg = msg .. " to '" .. info.name .. "'" end
+    local types
+    if #args == 1 and funclike(args[1]) then
+        local _, err = args[1](value)
+        error(msg .. " (" .. err .. ")", 3)
+    else
+        for i, v in ipairs(args) do args[i] = tostring(v) end
+        if args.n == 1 then types = args[1]
+        elseif args.n == 2 then types = args[1] .. " or " .. args[2]
+        else types = table.concat(args, ", ", 1, args.n - 1) .. ", or " .. args[args.n] end
+        error(msg .. " (expected " .. types .. ", got " .. vt .. ")", 3)
+    end
 end
 
--- textutils.[un]serialize is also very useful, so we load that in (but not anything else)
-do
-    local file = fs.open("/rom/apis/textutils.lua", "r")
-    local env = setmetatable({
-        dofile = function(path)
-            if path == "rom/modules/main/cc/expect.lua" then return expect
-            elseif path == "rom/modules/main/cc/require.lua" then
-                return {
-                    make = function()
-                        return function(mod)
-                            if mod == "cc.expect" then return expect
-                            else return {} end
-                        end
-                    end
-                }
-            end
+--- Check that a numbered argument matches the expected type(s). If the type
+-- doesn't match, throw an error.
+-- This function supports custom types by checking the __name metaproperty.
+-- Passing the result of @{expect.struct}, @{expect.array}, or @{expect.match}
+-- as a type parameter will use that function as a validator.
+-- @tparam number index The index of the argument to check
+-- @tparam any value The value to check
+-- @tparam string|function(v):boolean ... The types to check for
+-- @treturn any `value`
+function expect.expect(index, value, ...)
+    return check_type("bad argument #" .. index, value, ...)
+end
+
+--- Check that a key in a table matches the expected type(s). If the type
+-- doesn't match, throw an error.
+-- This function supports custom types by checking the __name metaproperty.
+-- Passing the result of @{expect.struct}, @{expect.array}, or @{expect.match}
+-- as a type parameter will use that function as a validator.
+-- @tparam any tbl The table (or other indexable value) to search through
+-- @tparam any key The key of the table to check
+-- @tparam string|function(v):boolean ... The types to check for
+-- @treturn any The indexed value in the table
+function expect.field(tbl, key, ...)
+    local ok, str = pcall(string.format, "%q", key)
+    if not ok then str = tostring(key) end
+    return check_type("bad field " .. str, tbl[key], ...)
+end
+
+--- Check that a number is between the specified minimum and maximum values. If
+-- the number is out of bounds, throw an error.
+-- @tparam number num The number to check
+-- @tparam[opt=-math.huge] number min The minimum value of the number (inclusive)
+-- @tparam[opt=math.huge] number max The maximum value of the number (inclusive)
+-- @treturn number `num`
+function expect.range(num, min, max)
+    expect.expect(1, num, "number")
+    expect.expect(2, min, "number", "nil")
+    expect.expect(3, max, "number", "nil")
+    if max and min and max < min then error("bad argument #3 (min must be less than or equal to max)", 2) end
+    if num ~= num or num < (min or -math.huge) or num > (max or math.huge) then error(("number outside of range (expected %s to be within %s and %s)"):format(num, min or -math.huge, max or math.huge), 3) end
+    return num
+end
+
+setmetatable(expect, {__call = function(self, ...) return expect.expect(...) end})
+
+--- serialization.lua
+
+local keywords = {
+    ["and"] = true,
+    ["break"] = true,
+    ["do"] = true,
+    ["else"] = true,
+    ["elseif"] = true,
+    ["end"] = true,
+    ["false"] = true,
+    ["for"] = true,
+    ["function"] = true,
+    ["goto"] = true,
+    ["if"] = true,
+    ["in"] = true,
+    ["local"] = true,
+    ["nil"] = true,
+    ["not"] = true,
+    ["or"] = true,
+    ["repeat"] = true,
+    ["return"] = true,
+    ["then"] = true,
+    ["true"] = true,
+    ["until"] = true,
+    ["while"] = true,
+}
+
+local function lua_serialize(val, stack, opts, level)
+    if stack[val] then error("Cannot serialize recursive value", 0) end
+    local tt = type(val)
+    if tt == "table" then
+        if not next(val) then return "{}" end
+        stack[val] = true
+        local res = opts.minified and "{" or "{\n"
+        local num = {}
+        for i, v in ipairs(val) do
+            if not opts.minified then res = res .. ("    "):rep(level) end
+            num[i] = true
+            res = res .. lua_serialize(v, stack, opts, level + 1) .. (opts.minified and "," or ",\n")
         end
-    }, {__index = _G}) -- We stub `dofile` here since textutils loads in expect via `dofile`, or through `cc.require` loaded by `dofile`
-    local fn
-    if loadstring and setfenv then
-        fn = loadstring(file.readAll(), "@/rom/apis/textutils.lua")
-        setfenv(fn, env)
+        for k, v in pairs(val) do if not num[k] then
+            if not opts.minified then res = res .. ("    "):rep(level) end
+            if type(k) == "string" and k:match "^[A-Za-z_][A-Za-z0-9_]*$" and not keywords[k] then res = res .. k
+            else res = res .. "[" .. lua_serialize(k, stack, opts, level + 1) .. "]" end
+            res = res .. (opts.minified and "=" or " = ") .. lua_serialize(v, stack, opts, level + 1) .. (opts.minified and "," or ",\n")
+        end end
+        if opts.minified then res = res:gsub(",$", "")
+        else res = res .. ("    "):rep(level - 1) end
+        stack[val] = nil
+        return res .. "}"
+    elseif tt == "nil" or tt == "number" or tt == "boolean" or tt == "string" then
+        return ("%q"):format(val):gsub("\\\n", "\\n"):gsub("\\?[%z\1-\31\127-\255]", function(c) return ("\\%03d"):format(string.byte(c)) end)
     else
-        fn = load(file.readAll(), "@/rom/apis/textutils.lua", "t", env)
+        error("Cannot serialize type " .. tt, 0)
     end
-    file.close()
-    fn()
-    serialize, unserialize = env.serialize, env.unserialize
+end
+
+--- Serializes an arbitrary Lua object into a serialized Lua string.
+-- @tparam any val The value to encode
+-- @tparam[opt] {minified=boolean} opts Any options to specify while encoding
+-- @treturn string The serialized Lua representation of the object
+function serialize(val, opts)
+    expect(2, opts, "table", "nil")
+    return lua_serialize(val, {}, opts or {}, 1)
+end
+
+--- Parses a serialized Lua string and returns a Lua value represented by the string.
+-- @tparam string str The serialized Lua string to decode
+-- @treturn any The Lua value from the serialized Lua
+function unserialize(str)
+    expect(1, str, "string")
+    return assert(load("return " .. str, "=unserialize", "t", {}))()
 end
 
 -- We need the keys API from CraftOS to be able to meaningfully decipher key constants.
@@ -63,6 +172,7 @@ do
 end
 
 -- load is the de facto loader - loadstring will no longer be available. Since load for strings isn't available on old versions of Lua/Cobalt, we shim it if necessary.
+local Cload = load
 if not pcall(load, "return", "=test", "t", {}) then
     local old_load, old_loadstring, expect, setfenv = load, loadstring, expect, setfenv
     function load(chunk, name, mode, env)
@@ -854,6 +964,7 @@ function executeThread(process, thread, ev, dead, allWaiting)
             thread.yielding = nil
         else
             --syslog.debug("Resuming thread", process.id, thread.id)
+            assert(process.globalMetatables, "Process " .. process.id .. " has no global metatables")
             currentThread = thread
             local old = globalMetatables
             globalMetatables = process.globalMetatables
@@ -1024,6 +1135,38 @@ if not getfenv then
             i = i + 1
         end
         return fn
+    end
+elseif getfenv(function() end) == _ENV then
+    local getfenv, d_getfenv, env = getfenv, debug.getfenv, _ENV
+    function _G.getfenv(o)
+        local e = getfenv(o)
+        if e == env then
+            e = nil
+            local i = 1
+            if type(o) == "number" then o = debug.getinfo(o).func end
+            while true do
+                local name, val = debug.getupvalue(o, i)
+                if name == "_ENV" and val ~= env then return val
+                elseif not name then break end
+                i = i + 1
+            end
+        end
+        return e
+    end
+    function debug.getfenv(o)
+        local e = d_getfenv(o)
+        if e == env then
+            e = nil
+            local i = 1
+            if type(o) == "number" then o = debug.getinfo(o).func end
+            while true do
+                local name, val = debug.getupvalue(o, i)
+                if name == "_ENV" and val ~= env then return val
+                elseif not name then break end
+                i = i + 1
+            end
+        end
+        return e
     end
 end
 
@@ -1229,6 +1372,7 @@ do
         [setupvalue] = debug.setupvalue,
         [getinfo] = debug.getinfo,
         [superprotect] = function() end,
+        [Cload] = function() end,
     }
     if debug.upvaluejoin then superprotected[upvaluejoin] = debug.upvaluejoin end
     if debug.getfenv then superprotected[d_getfenv] = debug.getfenv end
@@ -1252,3 +1396,8 @@ do
     )
     for k,v in pairs(protectedObjects) do protectedObjects[k] = {} end
 end
+
+debug.protect(_G.load)
+if _G.load ~= Cload then debug.protect(Cload) end
+debug.protect(debug.getmetatable)
+debug.protect(debug.setmetatable)

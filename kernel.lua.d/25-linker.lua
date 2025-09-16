@@ -180,7 +180,7 @@ function createRequire(process, G)
     setfenv(fileLoader, G) debug.protect(fileLoader)
     setfenv(libraryLoader, G) debug.protect(libraryLoader)
     setfenv(localLoaders[1], G) debug.protect(localLoaders[1])
-    for _,v in pairs(G.package.searchers) do setfenv(v, G) debug.protect(v) end
+    for _, v in pairs(G.package.searchers) do setfenv(v, G) debug.protect(v) end
 
     function G.require(name)
         expect(1, name, "string")

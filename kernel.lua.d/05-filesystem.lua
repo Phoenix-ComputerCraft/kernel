@@ -1465,6 +1465,12 @@ function filesystem.list(process, path)
     expect(1, path, "string")
     local retval = list_inner(process, path, true)
     table.sort(retval)
+    -- Is this too inefficient? It should only trigger for really complex overlaid mounts.
+    local i = 2
+    while i <= #retval do
+        if retval[i] == retval[i-1] then table.remove(retval, i)
+        else i = i + 1 end
+    end
     return retval
 end
 
@@ -1662,7 +1668,8 @@ function filesystem.chroot(process, path)
     expect(0, process, "table")
     expect(1, path, "string")
     if process.user ~= "root" then error("Could not change root: Permission denied", 2) end
-    local newroot = filesystem.combine(process.root, path) .. "/"
+    local newroot = "/" .. fs.combine(process.root, path) .. "/"
+    if newroot == "//" then newroot = "/" end
     if newroot:find(process.root, 1, true) ~= 1 then error("Could not change root: No such file or directory", 2) end
     local s = filesystem.stat(process, "/" .. path)
     if not s then error(path .. ": No such directory", 2) end

@@ -78,6 +78,7 @@ local arptable = {}
 local protocols = {send = {}, recv = {}}
 local openSockets = {}
 local openSocketIDs = {}
+local pdpListeners = {}
 local networkListeners = setmetatable({}, {__mode = "k"})
 local waiting = {arp = {}, socket = {}}
 local usedMessageIDs = {}
@@ -109,6 +110,22 @@ local usedMessageIDs = {}
 -- the number of sockets that could be open at once, much below the
 -- port exhaustion limit. However, putting everything on the same
 -- channel may cause too much chatter on the channel.
+
+local function tryClose(socket, port)
+    local devices = {}
+    for k in pairs(socket.devices) do devices[k] = true end
+    if openSockets[port] and openSockets[port].listen and openSockets[port].listen.process == socket.process then
+        for k in pairs(openSockets[port].listen.devices) do devices[k] = nil end
+    end
+    if openSockets[port] then
+        for _, s in pairs(openSockets[port]) do
+            if s.process == socket.process then
+                for k in pairs(s.devices) do devices[k] = nil end
+            end
+        end
+    end
+    for k in pairs(devices) do hardware.call(socket.process, hardware.get(k), "close", port) end
+end
 
 function protocols.send.link(info, destination, message)
     expect(2, destination, "number", "nil")
@@ -152,7 +169,7 @@ function protocols.send.arp_reply(info, destination, destIP)
     })
 end
 
-function protocols.send.internet(info, destination, message, ttl)
+function protocols.send.internet(info, destination, message, ttl, callback)
     expect(2, destination, "number")
     local msg = {PhoenixNetworking = true, type = "internet", hopsLeft = ttl or 15, payload = message, destination = numberToIP(destination)}
     local id = randomString(32)
@@ -165,33 +182,45 @@ function protocols.send.internet(info, destination, message, ttl)
                (not v or maskToPrefix(rt.sourceNetmask) > maskToPrefix(v.sourceNetmask)) then v = rt end
         end
     end end
-    if not v then return protocols.recv.control({}, {
-        PhoenixNetworking = true,
-        messageType = "unreachable",
-        error = "No route to host",
-        payload = msg
-    }) end
+    if not v then
+        local res = protocols.recv.control({}, {
+            PhoenixNetworking = true,
+            messageType = "unreachable",
+            error = "No route to host",
+            payload = msg
+        })
+        if callback then callback() end
+        return res
+    end
     if v.action == "unicast" and ipconfig[v.device.uuid] and ipconfig[v.device.uuid].up then
         info.device = v.device
         msg.source = numberToIP(ipconfig[v.device.uuid].ip)
-        if arptable[v.device.uuid] and arptable[v.device.uuid][v.destination] then return protocols.send.link(info, arptable[v.device.uuid][v.destination], msg) end
+        if arptable[v.device.uuid] and arptable[v.device.uuid][v.destination] then
+            local res = protocols.send.link(info, arptable[v.device.uuid][v.destination], msg)
+            if callback then callback() end
+            return res
+        end
         local sent = false
         local timer
         local function arp_reply(_, ip, dest)
             if not sent and ipToNumber(ip) == v.destination then
                 sent = true
                 protocols.send.link(info, dest, msg)
+                if callback then callback() end
             end
             if sent then for i, f in ipairs(waiting.arp) do if f == arp_reply then table.remove(waiting.arp, i) break end end end
         end
         local function timer_func(ev)
             if ev[2] == timer then
-                if not sent then protocols.recv.control({}, {
-                    PhoenixNetworking = true,
-                    messageType = "unreachable",
-                    error = "No route to host",
-                    payload = msg
-                }) end
+                if not sent then
+                    protocols.recv.control({}, {
+                        PhoenixNetworking = true,
+                        messageType = "unreachable",
+                        error = "No route to host",
+                        payload = msg
+                    })
+                    if callback then callback() end
+                end
                 sent = true
                 for i, w in ipairs(eventHooks.timer) do if w == timer_func then table.remove(eventHooks.timer, i) break end end
                 for i, f in ipairs(waiting.arp) do if f == arp_reply then table.remove(waiting.arp, i) break end end
@@ -206,28 +235,38 @@ function protocols.send.internet(info, destination, message, ttl)
     elseif v.action == "broadcast" and ipconfig[v.device.uuid] and ipconfig[v.device.uuid].up then
         info.device = v.device
         msg.source = numberToIP(ipconfig[v.device.uuid].ip)
-        return protocols.send.link(info, nil, msg)
+        local res = protocols.send.link(info, nil, msg)
+        if callback then callback() end
+        return res
     elseif v.action == "local" and ipconfig[v.device.uuid] and ipconfig[v.device.uuid].up then
         info.device = v.device
         msg.source = numberToIP(ipconfig[v.device.uuid].ip)
-        if arptable[v.device.uuid] and arptable[v.device.uuid][destination] then return protocols.send.link(info, arptable[v.device.uuid][destination], msg) end
+        if arptable[v.device.uuid] and arptable[v.device.uuid][destination] then
+            local res = protocols.send.link(info, arptable[v.device.uuid][destination], msg)
+            if callback then callback() end
+            return res
+        end
         local sent = false
         local timer
         local function arp_reply(_, ip, dest)
             if not sent and ipToNumber(ip) == destination then
                 sent = true
                 protocols.send.link(info, dest, msg)
+                if callback then callback() end
             end
             if sent then for i, f in ipairs(waiting.arp) do if f == arp_reply then table.remove(waiting.arp, i) break end end end
         end
         local function timer_func(ev)
             if ev[2] == timer then
-                if not sent then protocols.recv.control({}, {
-                    PhoenixNetworking = true,
-                    messageType = "unreachable",
-                    error = "No route to host",
-                    payload = msg
-                }) end
+                if not sent then
+                    protocols.recv.control({}, {
+                        PhoenixNetworking = true,
+                        messageType = "unreachable",
+                        error = "No route to host",
+                        payload = msg
+                    })
+                    if callback then callback() end
+                end
                 sent = true
                 for i, w in ipairs(eventHooks.timer) do if w == timer_func then table.remove(eventHooks.timer, i) break end end
             end
@@ -239,20 +278,25 @@ function protocols.send.internet(info, destination, message, ttl)
         timer = os.startTimer(2)
         return
     elseif v.action == "unreachable" then
-        return protocols.recv.control({}, {
+        local res = protocols.recv.control({}, {
             PhoenixNetworking = true,
             messageType = "unreachable",
             error = "Destination unreachable",
             payload = msg
         })
+        if callback then callback() end
+        return res
     elseif v.action == "prohibit" then
-        return protocols.recv.control({}, {
+        local res = protocols.recv.control({}, {
             PhoenixNetworking = true,
             messageType = "unreachable",
             error = "Prohibited",
             payload = msg
         })
+        if callback then callback() end
+        return res
     elseif v.action == "blackhole" then
+        if callback then callback() end
         return
     end
 end
@@ -271,6 +315,8 @@ end
 
 protocols.send.socket = {}
 
+local socketUpdate
+
 function protocols.send.socket.connect(info, ip, port, socket)
     for i = 1, 16384 do
         local p = math.random(49152, 65535)
@@ -284,6 +330,7 @@ function protocols.send.socket.connect(info, ip, port, socket)
     socket.sendSeq = math.floor(math.random()*0x10000000000)
     socket.sendSeqNext = socket.sendSeq + 2
     socket.sendSeqMax = socket.sendSeq + 256
+    socket.status = "syn-sent"
     info.outPort = port
     info.inPort = socket.localPort
     networkListeners[socket] = function(p)
@@ -300,27 +347,37 @@ function protocols.send.socket.connect(info, ip, port, socket)
         sequence = socket.sendSeqNext - 1,
         windowSize = 256,
         synchronize = true
-    })
-    local ok, err = pcall(hardware.call, info.process or KERNEL, info.device, "open", socket.localPort)
-    if not ok then
-        protocols.send.internet(info, ip, {
-            PhoenixNetworking = true,
-            type = "socket",
-            sequence = socket.sendSeqNext,
-            windowSize = 0,
-            reset = true
-        })
-        socket.status = "error"
-        socket.error = err
-        return false
-    end
-    socket.status = "syn-sent"
-    socket.nextUpdate = os.epoch "utc" + 5000
-    socket.process = info.process
-    socket.retryCount = 0
-    openSockets[socket.localPort] = openSockets[socket.localPort] or {}
-    openSockets[socket.localPort][port] = socket
-    openSocketIDs[socket.id] = socket
+    }, nil, function()
+        socket.devices = {[info.device.uuid] = true}
+        local ok, err = pcall(hardware.call, info.process or KERNEL, info.device, "open", socket.localPort)
+        if not ok then
+            -- Trim some lingering time-wait sockets early to reclaim ports
+            local open = {}
+            for port, list in pairs(openSockets) do for replyPort, socket in pairs(list) do open[#open+1] = port .. " -> " .. replyPort end end
+            syslog.debug("Purging open channels", table.concat(open, ", "))
+            socketUpdate(true)
+            ok, err = pcall(hardware.call, info.process or KERNEL, info.device, "open", socket.localPort)
+            if not ok then
+                protocols.send.internet(info, ip, {
+                    PhoenixNetworking = true,
+                    type = "socket",
+                    sequence = socket.sendSeqNext,
+                    windowSize = 0,
+                    reset = true
+                })
+                socket.status = "error"
+                socket.error = err
+                return false
+            end
+        end
+
+        socket.nextUpdate = os.epoch "utc" + 5000
+        socket.process = info.process
+        socket.retryCount = 0
+        openSockets[socket.localPort] = openSockets[socket.localPort] or {}
+        openSockets[socket.localPort][port] = socket
+        openSocketIDs[socket.id] = socket
+    end)
 end
 
 function protocols.send.socket.data(info, message, socket)
@@ -339,6 +396,8 @@ function protocols.send.socket.data(info, message, socket)
 end
 
 function protocols.send.socket.ack(info, num, socket)
+    --if socket.lastAck and os.epoch "utc" - socket.lastAck < 50 then return end
+    socket.lastAck = os.epoch "utc"
     return protocols.send.socket.data(info, {acknowledgement = num}, socket)
 end
 
@@ -351,6 +410,16 @@ function protocols.send.socket.reset(info, ip, port, seq, ack, inPort)
         sequence = seq,
         acknowledgement = ack,
         reset = true
+    })
+end
+
+function protocols.send.datagram(info, ip, sourcePort, port, message)
+    info.outPort = port
+    info.inPort = sourcePort or math.random(49152, 65535)
+    return protocols.send.internet(info, ip, {
+        PhoenixNetworking = true,
+        type = "datagram",
+        message = message
     })
 end
 
@@ -417,6 +486,35 @@ function syscalls.__socketcall(process, thread, id, method, ...)
     else error("No such method") end
 end
 
+function syscalls.__datagramcall(process, thread, port, id, method, ...)
+    local listener = pdpListeners[port]
+    local realProcess = process
+    while process ~= listener.process do
+        if process == nil then error("No such socket") end
+        process = processes[process.parent or -1]
+    end
+    local socket
+    if listener.listen then
+        for _, v in pairs(listener.open) do if v.id == id then socket = v break end end
+        if not socket then error("No socket found for ID") end
+    else socket = listener end
+    if method == "close" then
+        -- TODO: close channels properly
+        if listener.listen then
+            for k, v in pairs(listener.open) do if v.id == id then listener.open[k] = nil break end end
+        else
+            pdpListeners[port] = nil
+        end
+    elseif method == "read" then
+        local v = socket[1]
+        socket.n = socket.n - 1
+        for i = 1, socket.n do socket[i] = socket[i+1] end
+        return v
+    elseif method == "write" then return protocols.send.datagram({process = process}, socket.sourceIP, port, socket.port, ...)
+    elseif method == "transfer" then listener.process = realProcess
+    else error("No such method") end
+end
+
 local do_syscall = do_syscall
 
 local function makePSPHandle(socket)
@@ -431,7 +529,7 @@ local function makePSPHandle(socket)
         else return "closed" end
     end
     function obj:read(mode, ...)
-        if socket.status ~= "connected" and socket.status ~= "close-wait" and socket.status ~= "closed" then error("attempt to read from a " .. socket.status .. " handle", 2) end
+        if socket.status ~= "connected" and socket.status ~= "close-wait" and socket.status ~= "fin-wait" and socket.status ~= "closed" then error("attempt to read from a " .. socket.status .. " handle", 2) end
         return do_syscall("__socketcall", socket.id, "read", mode, ...)
     end
     function obj:write(data, ...)
@@ -445,6 +543,29 @@ local function makePSPHandle(socket)
     end
     function obj:transfer()
         return do_syscall("__socketcall", socket.id, "transfer")
+    end
+    return obj
+end
+
+local function makePDPHandle(socket, port)
+    local obj = setmetatable({id = socket.id}, {__name = "socket"})
+    function obj:localIP()
+        return numberToIP(socket.localIP)
+    end
+    function obj:status()
+        return "open"
+    end
+    function obj:read(mode, ...)
+        return do_syscall("__datagramcall", port, socket.id, "read", mode, ...)
+    end
+    function obj:write(data, ...)
+        return do_syscall("__datagramcall", port, socket.id, "write", data, ...)
+    end
+    function obj:close()
+        return do_syscall("__datagramcall", port, socket.id, "close")
+    end
+    function obj:transfer()
+        return do_syscall("__datagramcall", port, socket.id, "transfer")
     end
     return obj
 end
@@ -498,6 +619,14 @@ function protocols.recv.internet(info, message)
         for _, v in pairs(networkListeners) do retval = v(message) or retval end
         return retval
     end
+    if not arptable[info.device.uuid] or not arptable[info.device.uuid][info.sourceIP] then
+        arptable[info.device.uuid] = arptable[info.device.uuid] or {}
+        arptable[info.device.uuid][info.sourceIP] = info.sourceID
+        -- copy the table so we don't skip any if the function modifies the table
+        local tmp = {}
+        for i, v in ipairs(waiting.arp) do tmp[i] = v end
+        for _, v in ipairs(tmp) do v(v, info.sourceIP, info.sourceID) end
+    end
     info.ipPacket = message
     assert(message.payload.PhoenixNetworking)
     expect.field(message.payload, "type", "string")
@@ -512,6 +641,11 @@ function protocols.recv.control(info, message)
     if message.messageType == "ping" then protocols.send.control({device = info.device}, info.sourceIP, "pong", nil, info.ipPacket)
     else for _, v in pairs(networkListeners) do retval = v{type = "control", messageType = message.messageType, error = message.error, payload = message.payload, sender = numberToIP(info.sourceIP)} or retval end end
     return retval
+end
+
+local function safe_serialize(v)
+    local ok, res = pcall(serialize, v)
+    if ok then return res else return tostring(v) end
 end
 
 function protocols.recv.socket(info, message)
@@ -529,7 +663,7 @@ function protocols.recv.socket(info, message)
     do
         local s = {}
         for k, v in pairs(socket) do if k ~= "process" then s[k] = v end end
-        syslog.debug("Received socket message:", serialize(message), "\nSocket info:", serialize(s))
+        syslog.debug("Received socket message:", safe_serialize(message), "\nSocket info:", safe_serialize(s))
     end
     if socket.status == "listening" then
         if message.reset then return end
@@ -587,7 +721,7 @@ function protocols.recv.socket(info, message)
         if socket.process then socket.process.eventQueue[#socket.process.eventQueue+1] = {"handle_status_change", {id = socket.id, status = "connected"}} end
         return true
     else
-        if message.sequence < socket.recvSeq or message.sequence > socket.recvSeqMax then
+        if message.sequence < socket.recvSeq --[[or message.sequence > socket.recvSeqMax]] then
             syslog.debug("Sequence out of range")
             if message.reset then
                 socket.status = "error"
@@ -614,6 +748,7 @@ function protocols.recv.socket(info, message)
             else
                 socket.status = "closed"
                 openSockets[info.channel][info.replyChannel] = nil
+                tryClose(socket, info.channel)
                 if socket.process then socket.process.eventQueue[#socket.process.eventQueue+1] = {"handle_status_change", {id = socket.id, status = "closed"}} end
                 return true
             end
@@ -644,10 +779,12 @@ function protocols.recv.socket(info, message)
                 return true
             end
         elseif socket.status == "close-wait" then
+            --syslog.log({}, "close-wait", info.channel, info.replyChannel, message.acknowledgement, socket.sendSeqMax)
             if message.acknowledgement == socket.sendSeqMax then
                 syslog.debug("Socket closed")
                 socket.status = "closed"
                 openSockets[info.channel][info.replyChannel] = nil
+                tryClose(socket, info.channel)
                 if socket.process then socket.process.eventQueue[#socket.process.eventQueue+1] = {"handle_status_change", {id = socket.id, status = "closed"}} end
                 return true
             end
@@ -661,7 +798,7 @@ function protocols.recv.socket(info, message)
             if message.acknowledgement > socket.sendSeq and message.acknowledgement <= socket.sendSeqNext then
                 for i = socket.sendSeq, message.acknowledgement do socket.outQueue[i] = nil end
                 socket.sendSeq = message.acknowledgement
-                if message.windowSize then socket.sendSeqMax = socket.sendSeq + message.windowSize end
+                if message.windowSize and socket.status ~= "fin-wait" and socket.status ~= "closing" then socket.sendSeqMax = socket.sendSeq + message.windowSize end
             end
             if socket.status == "fin-wait" then
                 if message.acknowledgement == socket.sendSeqMax then
@@ -726,51 +863,86 @@ function protocols.recv.socket(info, message)
 end
 
 -- This function is called every second, handling any timed updates that may be necessary for sockets.
-local function socketUpdate()
+function socketUpdate(force)
     local time = os.epoch "utc"
     local event = false
-    for port, list in pairs(openSockets) do for replyPort, socket in pairs(list) do if time >= socket.nextUpdate then
-        if socket.status == "syn-sent" then
-            socket.status = "error"
-            socket.error = "Connection timed out (syn-sent)"
-            openSockets[port][replyPort] = nil
-            if socket.process then socket.process.eventQueue[#socket.process.eventQueue+1] = {"handle_status_change", {id = socket.id, status = "error"}} event = true end
-        elseif socket.status == "syn-received" then
-            socket.retryCount = socket.retryCount + 1
-            if socket.retryCount > 3 then
+    for port, list in pairs(openSockets) do for replyPort, socket in pairs(list) do
+        if time >= socket.nextUpdate then
+            if socket.status == "syn-sent" then
                 socket.status = "error"
-                socket.error = "Connection timed out (syn-received)"
+                socket.error = "Connection timed out (syn-sent)"
                 openSockets[port][replyPort] = nil
                 if socket.process then socket.process.eventQueue[#socket.process.eventQueue+1] = {"handle_status_change", {id = socket.id, status = "error"}} event = true end
-            else
-                -- TODO: resend syn+ack packet
-                socket.nextUpdate = os.epoch "utc" + 2000
-            end
-        elseif socket.status == "connected" then
-            for i = socket.sendSeq + 1, socket.sendSeqNext - 1 do
-                if socket.outQueue[i] then
-                    protocols.send.socket.data({}, {
-                        sequence = i,
-                        payload = socket.outQueue[i]
-                    }, socket)
+            elseif socket.status == "syn-received" then
+                socket.retryCount = socket.retryCount + 1
+                if socket.retryCount > 3 then
+                    socket.status = "error"
+                    socket.error = "Connection timed out (syn-received)"
+                    openSockets[port][replyPort] = nil
+                    if socket.process then socket.process.eventQueue[#socket.process.eventQueue+1] = {"handle_status_change", {id = socket.id, status = "error"}} event = true end
+                else
+                    -- TODO: resend syn+ack packet
+                    socket.nextUpdate = os.epoch "utc" + 2000
                 end
-            end
-            if socket.nextAck then
-                protocols.send.socket.ack({}, socket.recvSeq - 1, socket)
-                socket.nextAck = nil
-            end
-            socket.nextUpdate = os.epoch "utc" + 2000
-        elseif socket.status == "fin-wait" then
+            elseif socket.status == "connected" then
+                for i = socket.sendSeq + 1, socket.sendSeqNext - 1 do
+                    if socket.outQueue[i] then
+                        protocols.send.socket.data({}, {
+                            sequence = i,
+                            payload = socket.outQueue[i]
+                        }, socket)
+                    end
+                end
+                if socket.nextAck then
+                    protocols.send.socket.ack({}, socket.recvSeq - 1, socket)
+                    socket.nextAck = nil
+                end
+                socket.nextUpdate = os.epoch "utc" + 2000
+            elseif socket.status == "fin-wait" then
 
-        elseif socket.status == "close-wait" then
+            elseif socket.status == "close-wait" then
 
-        elseif socket.status == "time-wait" then
+            end
+        elseif socket.status == "time-wait" and (time >= socket.nextUpdate or force) then
             syslog.debug("Time wait finished on port " .. port)
             socket.status = "closed"
             openSockets[port][replyPort] = nil
+            if replyPort ~= "listen" then tryClose(socket, port) end
         end
-    end end end
+    end end
     return event
+end
+
+function protocols.recv.datagram(info, message)
+    if not pdpListeners[info.channel] then
+        syslog.debug("Received spurious PDP message on port " .. info.channel .. ", discarding.")
+        return
+    end
+    local listener = pdpListeners[info.channel]
+    if listener.listen then
+        local socket = listener.open[info.sourceIP]
+        if socket then
+            socket.n = socket.n + 1
+            socket[socket.n] = message.message
+            listener.process.eventQueue[#listener.process.eventQueue+1] = {"handle_data_ready", {id = socket.id}}
+        else
+            listener.open[info.sourceIP] = {
+                id = nextHandleID,
+                sourceIP = info.sourceIP,
+                localIP = info.localIP,
+                port = info.replyChannel,
+                n = 1,
+                message.message
+            }
+            nextHandleID = nextHandleID + 1
+            listener.process.eventQueue[#listener.process.eventQueue+1] = {"network_request", {uri = listener.uri, ip = numberToIP(info.sourceIP), handle = makePDPHandle(listener.open[info.sourceIP], info.channel)}}
+        end
+    else
+        listener.n = listener.n + 1
+        listener[listener.n] = message.message
+        listener.process.eventQueue[#listener.process.eventQueue+1] = {"handle_data_ready", {id = listener.id}}
+    end
+    return true
 end
 
 eventHooks.modem_message = eventHooks.modem_message or {}
@@ -782,7 +954,7 @@ eventHooks.modem_message[#eventHooks.modem_message+1] = function(ev)
             return
         end
         if not ipconfig[node.uuid] or not ipconfig[node.uuid].up then return end
-        syslog.debug(ev[2], serialize(ev[5]))
+        syslog.debug(ev[2], safe_serialize(ev[5]))
         local ok, err = pcall(protocols.recv[ev[5].type], {channel = ev[3], replyChannel = ev[4], device = node}, ev[5])
         if not ok then syslog.log({level = "debug", module = "Network"}, "Network event errored while processing:", err)
         else return err end
@@ -810,6 +982,30 @@ local function pspHandler(process, options)
     return makePSPHandle(socket)
 end
 
+local function pdpHandler(process, options)
+    local uri = parseURI(options.url)
+    if not uri.port then error("No port specified") end
+    local localPort
+    for i = 1, 16384 do
+        local p = math.random(49152, 65535)
+        if not pdpListeners[p] then localPort = p break end
+    end
+    if not localPort then error("Too many open sockets") end
+    local ip = ipToNumber(uri.host)
+    local port = uri.port
+    local socket = {
+        process = process,
+        id = nextHandleID,
+        sourceIP = ip,
+        port = port,
+        n = 0
+    }
+    nextHandleID = nextHandleID + 1
+    pdpListeners[localPort] = socket
+    for _, v in ipairs{hardware.find("modem")} do hardware.call(process, v, "open", localPort) end
+    return makePDPHandle(socket, localPort)
+end
+
 --#endregion
 
 --#region HTTP/Rednet handlers
@@ -820,244 +1016,247 @@ local rednetHandles = {}
 local rednetChannel = os.computerID() % 65500
 local receivedRednetMessages = {}
 
-eventHooks.http_success = eventHooks.http_success or {}
-eventHooks.http_success[#eventHooks.http_success+1] = function(ev)
-    local info = httpRequests[ev[2]]
-    if info then
-        info.handle, info.status = ev[3], "open"
-        info.process.eventQueue[#info.process.eventQueue+1] = {"handle_status_change", {id = info.id, status = "open"}}
-        httpRequests[ev[2]] = nil
-        return true
-    else syslog.log({level = "notice"}, "Received HTTP response for " .. ev[2] .. " but nobody requested it; ignoring.") end
-end
+local httpHandler, wsHandler
+if http then
+    eventHooks.http_success = eventHooks.http_success or {}
+    eventHooks.http_success[#eventHooks.http_success+1] = function(ev)
+        local info = httpRequests[ev[2]]
+        if info then
+            info.handle, info.status = ev[3], "open"
+            info.process.eventQueue[#info.process.eventQueue+1] = {"handle_status_change", {id = info.id, status = "open"}}
+            httpRequests[ev[2]] = nil
+            return true
+        else syslog.log({level = "notice"}, "Received HTTP response for " .. ev[2] .. " but nobody requested it; ignoring.") end
+    end
 
-eventHooks.http_failure = eventHooks.http_failure or {}
-eventHooks.http_failure[#eventHooks.http_failure+1] = function(ev)
-    local info = httpRequests[ev[2]]
-    if info then
-        if ev[4] then info.handle, info.status = ev[4], "open"
-        else info.status, info.error = "error", ev[3] end
-        info.process.eventQueue[#info.process.eventQueue+1] = {"handle_status_change", {id = info.id, status = info.status}}
-        httpRequests[ev[2]] = nil
-        return true
-    else syslog.log({level = "notice"}, "Received HTTP response for " .. ev[2] .. " but nobody requested it; ignoring.") end
-end
+    eventHooks.http_failure = eventHooks.http_failure or {}
+    eventHooks.http_failure[#eventHooks.http_failure+1] = function(ev)
+        local info = httpRequests[ev[2]]
+        if info then
+            if ev[4] then info.handle, info.status = ev[4], "open"
+            else info.status, info.error = "error", ev[3] end
+            info.process.eventQueue[#info.process.eventQueue+1] = {"handle_status_change", {id = info.id, status = info.status}}
+            httpRequests[ev[2]] = nil
+            return true
+        else syslog.log({level = "notice"}, "Received HTTP response for " .. ev[2] .. " but nobody requested it; ignoring.") end
+    end
 
-eventHooks.websocket_success = eventHooks.websocket_success or {}
-eventHooks.websocket_success[#eventHooks.websocket_success+1] = function(ev)
-    local info = httpRequests[ev[2]]
-    if info then
-        info.handle, info.status = ev[3], "open"
-        info.process.eventQueue[#info.process.eventQueue+1] = {"handle_status_change", {id = info.id, status = "open"}}
-        return true
-    else syslog.log({level = "notice"}, "Received WebSocket response for " .. ev[2] .. " but nobody requested it; ignoring.") end
-end
+    eventHooks.websocket_success = eventHooks.websocket_success or {}
+    eventHooks.websocket_success[#eventHooks.websocket_success+1] = function(ev)
+        local info = httpRequests[ev[2]]
+        if info then
+            info.handle, info.status = ev[3], "open"
+            info.process.eventQueue[#info.process.eventQueue+1] = {"handle_status_change", {id = info.id, status = "open"}}
+            return true
+        else syslog.log({level = "notice"}, "Received WebSocket response for " .. ev[2] .. " but nobody requested it; ignoring.") end
+    end
 
-eventHooks.websocket_failure = eventHooks.websocket_failure or {}
-eventHooks.websocket_failure[#eventHooks.websocket_failure+1] = function(ev)
-    local info = httpRequests[ev[2]]
-    if info then
-        info.status, info.error = "error", ev[3]
-        info.process.eventQueue[#info.process.eventQueue+1] = {"handle_status_change", {id = info.id, status = info.status}}
-        return true
-    else syslog.log({level = "notice"}, "Received WebSocket response for " .. ev[2] .. " but nobody requested it; ignoring.") end
-end
+    eventHooks.websocket_failure = eventHooks.websocket_failure or {}
+    eventHooks.websocket_failure[#eventHooks.websocket_failure+1] = function(ev)
+        local info = httpRequests[ev[2]]
+        if info then
+            info.status, info.error = "error", ev[3]
+            info.process.eventQueue[#info.process.eventQueue+1] = {"handle_status_change", {id = info.id, status = info.status}}
+            return true
+        else syslog.log({level = "notice"}, "Received WebSocket response for " .. ev[2] .. " but nobody requested it; ignoring.") end
+    end
 
-eventHooks.websocket_message = eventHooks.websocket_message or {}
-eventHooks.websocket_message[#eventHooks.websocket_message+1] = function(ev)
-    local info = httpRequests[ev[2]]
-    if info then
-        -- TODO: decide whether to transcode if the requested encoding doesn't match the message
-        info.buffer = info.buffer .. ev[3]
-        info.process.eventQueue[#info.process.eventQueue+1] = {"handle_data_ready", {id = info.id}}
-        return true
-    else syslog.log({level = "notice"}, "Received WebSocket message for " .. ev[2] .. " but nobody requested it; ignoring.") end
-end
+    eventHooks.websocket_message = eventHooks.websocket_message or {}
+    eventHooks.websocket_message[#eventHooks.websocket_message+1] = function(ev)
+        local info = httpRequests[ev[2]]
+        if info then
+            -- TODO: decide whether to transcode if the requested encoding doesn't match the message
+            info.buffer = info.buffer .. ev[3]
+            info.process.eventQueue[#info.process.eventQueue+1] = {"handle_data_ready", {id = info.id}}
+            return true
+        else syslog.log({level = "notice"}, "Received WebSocket message for " .. ev[2] .. " but nobody requested it; ignoring.") end
+    end
 
-eventHooks.websocket_closed = eventHooks.websocket_closed or {}
-eventHooks.websocket_closed[#eventHooks.websocket_closed+1] = function(ev)
-    local info = httpRequests[ev[2]]
-    if info then
-        info.status = "closed"
-        info.process.eventQueue[#info.process.eventQueue+1] = {"handle_status_change", {id = info.id, status = info.status}}
-        httpRequests[ev[2]] = nil
-        return true
-    else syslog.log({level = "notice"}, "Received WebSocket message for " .. ev[2] .. " but it's not open; ignoring.") end
-end
+    eventHooks.websocket_closed = eventHooks.websocket_closed or {}
+    eventHooks.websocket_closed[#eventHooks.websocket_closed+1] = function(ev)
+        local info = httpRequests[ev[2]]
+        if info then
+            info.status = "closed"
+            info.process.eventQueue[#info.process.eventQueue+1] = {"handle_status_change", {id = info.id, status = info.status}}
+            httpRequests[ev[2]] = nil
+            return true
+        else syslog.log({level = "notice"}, "Received WebSocket message for " .. ev[2] .. " but it's not open; ignoring.") end
+    end
 
-eventHooks.modem_message = eventHooks.modem_message or {}
-eventHooks.modem_message[#eventHooks.modem_message+1] = function(ev)
-    local retval = false
-    if rednetOpenCount[ev[2]] and (ev[3] == rednetChannel or ev[3] == 65535) and
-       type(ev[5]) == "table" and type(ev[5].nMessageID) == "number" and
-       ev[5].nMessageID == ev[5].nMessageID and not receivedRednetMessages[ev[5].nMessageID] and
-       ((ev[5].nRecipient and ev[5].nRecipient == os.computerID()) or ev[3] == 65535) then
-        if rednetHandles[ev[5].nSender] then
-            for _, v in ipairs(rednetHandles[ev[5].nSender]) do
-                if not v.protocol or v.protocol == ev[5].sProtocol then
-                    v.buffer[#v.buffer+1] = deepcopy(ev[5].message)
-                    receivedRednetMessages[ev[5].nMessageID] = os.clock() + 9.5
-                    v.process.eventQueue[#v.process.eventQueue+1] = {"handle_data_ready", {id = v.id}}
-                    retval = true
+    eventHooks.modem_message = eventHooks.modem_message or {}
+    eventHooks.modem_message[#eventHooks.modem_message+1] = function(ev)
+        local retval = false
+        if rednetOpenCount[ev[2]] and (ev[3] == rednetChannel or ev[3] == 65535) and
+        type(ev[5]) == "table" and type(ev[5].nMessageID) == "number" and
+        ev[5].nMessageID == ev[5].nMessageID and not receivedRednetMessages[ev[5].nMessageID] and
+        ((ev[5].nRecipient and ev[5].nRecipient == os.computerID()) or ev[3] == 65535) then
+            if rednetHandles[ev[5].nSender] then
+                for _, v in ipairs(rednetHandles[ev[5].nSender]) do
+                    if not v.protocol or v.protocol == ev[5].sProtocol then
+                        v.buffer[#v.buffer+1] = deepcopy(ev[5].message)
+                        receivedRednetMessages[ev[5].nMessageID] = os.clock() + 9.5
+                        v.process.eventQueue[#v.process.eventQueue+1] = {"handle_data_ready", {id = v.id}}
+                        retval = true
+                    end
                 end
             end
-        end
-        if rednetHandles[0xFFFFFFFF] then
-            for _, v in ipairs(rednetHandles[0xFFFFFFFF]) do
-                if not v.protocol or v.protocol == ev[5].sProtocol then
-                    v.buffer[#v.buffer+1] = deepcopy(ev[5].message)
-                    receivedRednetMessages[ev[5].nMessageID] = os.clock() + 9.5
-                    v.process.eventQueue[#v.process.eventQueue+1] = {"handle_data_ready", {id = v.id}}
-                    retval = true
+            if rednetHandles[0xFFFFFFFF] then
+                for _, v in ipairs(rednetHandles[0xFFFFFFFF]) do
+                    if not v.protocol or v.protocol == ev[5].sProtocol then
+                        v.buffer[#v.buffer+1] = deepcopy(ev[5].message)
+                        receivedRednetMessages[ev[5].nMessageID] = os.clock() + 9.5
+                        v.process.eventQueue[#v.process.eventQueue+1] = {"handle_data_ready", {id = v.id}}
+                        retval = true
+                    end
                 end
             end
+            for k, v in pairs(receivedRednetMessages) do if v < os.clock() then receivedRednetMessages[k] = nil end end
         end
-        for k, v in pairs(receivedRednetMessages) do if v < os.clock() then receivedRednetMessages[k] = nil end end
+        return retval
     end
-    return retval
-end
 
--- TODO: Fix handle:read() not being equivalent to handle:read("*l")
+    -- TODO: Fix handle:read() not being equivalent to handle:read("*l")
 
-local request = http.request
-local function httpHandler(process, options)
-    expect.field(options, "encoding", "string", "nil")
-    expect.field(options, "headers", "table", "nil")
-    expect.field(options, "method", "string", "nil")
-    expect.field(options, "redirect", "boolean", "nil")
-    local info = {status = "ready", process = process, id = nextHandleID}
-    local obj = setmetatable({id = nextHandleID}, {__name = "socket"})
-    nextHandleID = nextHandleID + 1
-    function obj:status()
-        return info.status, info.error
-    end
-    function obj:read(mode, ...)
-        if info.status ~= "open" then error("attempt to read from a " .. info.status .. " handle", 2) end
-        mode = mode or "*l"
-        if type(mode) ~= "string" and type(mode) ~= "number" then error("bad argument (expected string or number, got " .. type(mode) .. ")", 2) end
-        mode = mode:gsub("^%*", "")
-        if mode == "a" then
-            if select("#", ...) > 0 then return info.handle.readAll(), self:read(...)
-            else return info.handle.readAll() end
-        elseif mode == "l" then
-            if select("#", ...) > 0 then return info.handle.readLine(false), self:read(...)
-            else return info.handle.readLine(false) end
-        elseif mode == "L" then
-            if select("#", ...) > 0 then return info.handle.readLine(true), self:read(...)
-            else return info.handle.readLine(true) end
-        elseif mode == "n" then
-            local str
-            repeat
-                str = info.handle.read(1)
-                if not str then return nil end
-            until tonumber(str)
-            while true do
-                local c = info.handle.read(1)
-                if not c or not c:match "%d" then break end
-                str = str .. c
+    local request = http.request
+    function httpHandler(process, options)
+        expect.field(options, "encoding", "string", "nil")
+        expect.field(options, "headers", "table", "nil")
+        expect.field(options, "method", "string", "nil")
+        expect.field(options, "redirect", "boolean", "nil")
+        local info = {status = "ready", process = process, id = nextHandleID}
+        local obj = setmetatable({id = nextHandleID}, {__name = "socket"})
+        nextHandleID = nextHandleID + 1
+        function obj:status()
+            return info.status, info.error
+        end
+        function obj:read(mode, ...)
+            if info.status ~= "open" then error("attempt to read from a " .. info.status .. " handle", 2) end
+            mode = mode or "*l"
+            if type(mode) ~= "string" and type(mode) ~= "number" then error("bad argument (expected string or number, got " .. type(mode) .. ")", 2) end
+            mode = mode:gsub("^%*", "")
+            if mode == "a" then
+                if select("#", ...) > 0 then return info.handle.readAll(), self:read(...)
+                else return info.handle.readAll() end
+            elseif mode == "l" then
+                if select("#", ...) > 0 then return info.handle.readLine(false), self:read(...)
+                else return info.handle.readLine(false) end
+            elseif mode == "L" then
+                if select("#", ...) > 0 then return info.handle.readLine(true), self:read(...)
+                else return info.handle.readLine(true) end
+            elseif mode == "n" then
+                local str
+                repeat
+                    str = info.handle.read(1)
+                    if not str then return nil end
+                until tonumber(str)
+                while true do
+                    local c = info.handle.read(1)
+                    if not c or not c:match "%d" then break end
+                    str = str .. c
+                end
+                if select("#", ...) > 0 then return tonumber(str), self:read(...)
+                else return tonumber(str) end
+            elseif type(mode) == "number" then
+                if select("#", ...) > 0 then return info.handle.read(mode), self:read(...)
+                else return info.handle.read(mode) end
+            else error("bad argument (invalid mode '" .. mode .. "')", 2) end
+        end
+        function obj:write(...)
+            if info.status ~= "ready" then error("attempt to write to a " .. info.status .. " handle", 2) end
+            local data
+            if select("#", ...) > 0 then
+                data = ""
+                for _, v in ipairs{...} do data = data .. tostring(v) end
             end
-            if select("#", ...) > 0 then return tonumber(str), self:read(...)
-            else return tonumber(str) end
-        elseif type(mode) == "number" then
-            if select("#", ...) > 0 then return info.handle.read(mode), self:read(...)
-            else return info.handle.read(mode) end
-        else error("bad argument (invalid mode '" .. mode .. "')", 2) end
+            local url = options.url .. "#" .. info.id
+            local ok, err = request{url = url, body = data, headers = options.headers, binary = options.encoding == "binary" or options.encoding == nil, method = options.method, redirect = options.redirect}
+            if ok then
+                httpRequests[url] = info
+                info.status = "connecting"
+            else info.status, info.error = "error", err end
+        end
+        function obj:close()
+            if info.status ~= "open" then error("attempt to close a " .. info.status .. " handle", 2) end
+            info.handle.close()
+            info.status = "closed"
+        end
+        function obj:responseHeaders()
+            if info.status ~= "open" then error("attempt to read from a " .. info.status .. " handle", 2) end
+            return info.handle.getResponseHeaders()
+        end
+        function obj:responseCode()
+            if info.status ~= "open" then error("attempt to read from a " .. info.status .. " handle", 2) end
+            return info.handle.getResponseCode()
+        end
+        return obj
     end
-    function obj:write(...)
-        if info.status ~= "ready" then error("attempt to write to a " .. info.status .. " handle", 2) end
-        local data
-        if select("#", ...) > 0 then
-            data = ""
-            for _, v in ipairs{...} do data = data .. tostring(v) end
+
+    -- TODO: decide whether messages should be split, binary, etc.
+    function wsHandler(process, options)
+        expect.field(options, "encoding", "string", "nil")
+        expect.field(options, "headers", "table", "nil")
+        local info = {process = process, id = nextHandleID, buffer = ""}
+        local obj = setmetatable({id = nextHandleID}, {__name = "socket"})
+        nextHandleID = nextHandleID + 1
+        function obj:status()
+            return info.status, info.error
+        end
+        function obj:read(mode, ...)
+            if info.status ~= "open" then error("attempt to read from a " .. info.status .. " handle", 2) end
+            mode = mode or "*l"
+            if type(mode) ~= "string" and type(mode) ~= "number" then error("bad argument (expected string or number, got " .. type(mode) .. ")", 2) end
+            if info.buffer == "" then return nil end
+            mode = mode:gsub("^%*", "")
+            if mode == "a" then
+                local str = info.buffer
+                info.buffer = ""
+                return str
+            elseif mode == "l" then
+                local str, pos = info.buffer:match "^([^\n]*)\n?()"
+                if str then
+                    info.buffer = info.buffer:sub(pos)
+                    if select("#", ...) > 0 then return str, self:read(...)
+                    else return str end
+                else return nil end
+            elseif mode == "L" then
+                local str, pos = info.buffer:match "^([^\n]*\n?)()"
+                if str then
+                    info.buffer = info.buffer:sub(pos)
+                    if select("#", ...) > 0 then return str, self:read(...)
+                    else return str end
+                else return nil end
+            elseif mode == "n" then
+                local str, pos = info.buffer:match "(%d+)()"
+                if str then
+                    info.buffer = info.buffer:sub(pos)
+                    if select("#", ...) > 0 then return tonumber(str), self:read(...)
+                    else return tonumber(str) end
+                else return nil end
+            elseif type(mode) == "number" then
+                local str = info.buffer:sub(1, mode)
+                info.buffer = info.buffer:sub(mode + 1)
+                if select("#", ...) > 0 then return str, self:read(...)
+                else return str end
+            else error("bad argument (invalid mode '" .. mode .. "')", 2) end
+        end
+        function obj:write(data, ...)
+            if info.status ~= "open" then error("attempt to write to a " .. info.status .. " handle", 2) end
+            info.handle.send(tostring(data), options.encoding == "binary")
+            if select("#", ...) > 0 then return self:write(...) end
+        end
+        function obj:close()
+            if info.status ~= "open" then error("attempt to close a " .. info.status .. " handle", 2) end
+            info.handle.close()
+            info.status = "closed"
         end
         local url = options.url .. "#" .. info.id
-        local ok, err = request{url = url, body = data, headers = options.headers, binary = options.encoding == "binary" or options.encoding == nil, method = options.method, redirect = options.redirect}
+        local ok, err = http.websocket(url, options.headers)
         if ok then
             httpRequests[url] = info
             info.status = "connecting"
-        else info.status, info.error = "error", err end
+        else return nil, err end
+        return obj
     end
-    function obj:close()
-        if info.status ~= "open" then error("attempt to close a " .. info.status .. " handle", 2) end
-        info.handle.close()
-        info.status = "closed"
-    end
-    function obj:responseHeaders()
-        if info.status ~= "open" then error("attempt to read from a " .. info.status .. " handle", 2) end
-        return info.handle.getResponseHeaders()
-    end
-    function obj:responseCode()
-        if info.status ~= "open" then error("attempt to read from a " .. info.status .. " handle", 2) end
-        return info.handle.getResponseCode()
-    end
-    return obj
-end
-
--- TODO: decide whether messages should be split, binary, etc.
-local function wsHandler(process, options)
-    expect.field(options, "encoding", "string", "nil")
-    expect.field(options, "headers", "table", "nil")
-    local info = {process = process, id = nextHandleID, buffer = ""}
-    local obj = setmetatable({id = nextHandleID}, {__name = "socket"})
-    nextHandleID = nextHandleID + 1
-    function obj:status()
-        return info.status, info.error
-    end
-    function obj:read(mode, ...)
-        if info.status ~= "open" then error("attempt to read from a " .. info.status .. " handle", 2) end
-        mode = mode or "*l"
-        if type(mode) ~= "string" and type(mode) ~= "number" then error("bad argument (expected string or number, got " .. type(mode) .. ")", 2) end
-        if info.buffer == "" then return nil end
-        mode = mode:gsub("^%*", "")
-        if mode == "a" then
-            local str = info.buffer
-            info.buffer = ""
-            return str
-        elseif mode == "l" then
-            local str, pos = info.buffer:match "^([^\n]*)\n?()"
-            if str then
-                info.buffer = info.buffer:sub(pos)
-                if select("#", ...) > 0 then return str, self:read(...)
-                else return str end
-            else return nil end
-        elseif mode == "L" then
-            local str, pos = info.buffer:match "^([^\n]*\n?)()"
-            if str then
-                info.buffer = info.buffer:sub(pos)
-                if select("#", ...) > 0 then return str, self:read(...)
-                else return str end
-            else return nil end
-        elseif mode == "n" then
-            local str, pos = info.buffer:match "(%d+)()"
-            if str then
-                info.buffer = info.buffer:sub(pos)
-                if select("#", ...) > 0 then return tonumber(str), self:read(...)
-                else return tonumber(str) end
-            else return nil end
-        elseif type(mode) == "number" then
-            local str = info.buffer:sub(1, mode)
-            info.buffer = info.buffer:sub(mode + 1)
-            if select("#", ...) > 0 then return str, self:read(...)
-            else return str end
-        else error("bad argument (invalid mode '" .. mode .. "')", 2) end
-    end
-    function obj:write(data, ...)
-        if info.status ~= "open" then error("attempt to write to a " .. info.status .. " handle", 2) end
-        info.handle.send(tostring(data), options.encoding == "binary")
-        if select("#", ...) > 0 then return self:write(...) end
-    end
-    function obj:close()
-        if info.status ~= "open" then error("attempt to close a " .. info.status .. " handle", 2) end
-        info.handle.close()
-        info.status = "closed"
-    end
-    local url = options.url .. "#" .. info.id
-    local ok, err = http.websocket(url, options.headers)
-    if ok then
-        httpRequests[url] = info
-        info.status = "connecting"
-    else return nil, err end
-    return obj
 end
 
 -- TODO: consider adding hostname lookup
@@ -1186,7 +1385,8 @@ uriSchemes = {
     ["wss?"] = wsHandler,
     ["rednet"] = rednetHandler,
     ["rednet%+%a+"] = rednetHandler,
-    ["psp"] = pspHandler
+    ["psp"] = pspHandler,
+    ["pdp"] = pdpHandler,
 }
 
 function syscalls.connect(process, thread, options)
@@ -1209,7 +1409,7 @@ end
 function syscalls.listen(process, thread, uri)
     expect(1, uri, "string")
     local URI = parseURI(uri)
-    if http.addListener then
+    if http and http.addListener then
         if URI.scheme == "http" then
             http.addListener(URI.port or 80)
             return
@@ -1220,15 +1420,26 @@ function syscalls.listen(process, thread, uri)
     end
     if URI.scheme == "psp" then
         if not URI.port then error("Missing port") end
+        if openSockets[URI.port] and openSockets[URI.port].listen then error("Port already open") end
         local ip = ipToNumber(URI.host)
+        local devices = {}
         for k, v in pairs(ipconfig) do
             if v.up and (ip == 0 or v.ip == ip) then
-                hardware.call(process, hardware.get(k), "open", URI.port)
+                local dev = hardware.get(k)
+                if not pcall(hardware.call, process, dev, "open", URI.port) then
+                    local open = {}
+                    for port, list in pairs(openSockets) do for replyPort, socket in pairs(list) do open[#open+1] = port .. " -> " .. replyPort .. " (" .. socket.status .. ")" end end
+                    syslog.debug("Purging open channels", table.concat(open, ", "))
+                    socketUpdate(true)
+                    hardware.call(process, dev, "open", URI.port)
+                end
+                devices[dev.uuid] = true
             end
         end
         local socket = {
             localPort = URI.port,
             id = nextHandleID,
+            devices = devices,
             status = "listening",
             process = process,
             nextUpdate = math.huge,
@@ -1241,12 +1452,58 @@ function syscalls.listen(process, thread, uri)
         openSockets[URI.port].listen = socket
         openSocketIDs[socket.id] = socket
         return
+    elseif URI.scheme == "pdp" then
+        if not URI.port then error("Missing port") end
+        if pdpListeners[URI.port] then error("Port already open") end
+        local ip = ipToNumber(URI.host)
+        for k, v in pairs(ipconfig) do
+            if v.up and (ip == 0 or v.ip == ip) then
+                hardware.call(process, hardware.get(k), "open", URI.port)
+            end
+        end
+        pdpListeners[URI.port] = {
+            process = process,
+            listen = true,
+            open = {}
+        }
+        return
     end
     error("Invalid protocol " .. URI.scheme)
 end
 
 function syscalls.unlisten(process, thread, uri)
-    -- TODO
+    expect(1, uri, "string")
+    local URI = parseURI(uri)
+    if http and http.addListener then
+        if URI.scheme == "http" then
+            http.removeListener(URI.port or 80)
+            return
+        elseif URI.scheme == "ws" then
+            -- TODO
+            return
+        end
+    end
+    if URI.scheme == "psp" then
+        if not URI.port then error("Missing port") end
+        if not openSockets[URI.port] or not openSockets[URI.port].listen then return end
+        if openSockets[URI.port].listen.process ~= process then error("Port open in another process") end
+        for k in pairs(openSockets[URI.port].listen.devices) do hardware.call(process, hardware.get(k), "close", URI.port) end
+        openSockets[URI.port].listen = nil
+        -- TODO: harden this?
+        return
+    elseif URI.scheme == "pdp" then
+        if not URI.port then error("Missing port") end
+        if not pdpListeners[URI.port] then return end
+        local ip = ipToNumber(URI.host)
+        for k, v in pairs(ipconfig) do
+            if v.up and (ip == 0 or v.ip == ip) then
+                hardware.call(process, hardware.get(k), "close", URI.port)
+            end
+        end
+        pdpListeners[URI.port] = nil
+        return
+    end
+    error("Invalid protocol " .. URI.scheme)
 end
 
 function syscalls.ipconfig(process, thread, device, info)

@@ -27,6 +27,7 @@ for i = 0, #loglevels do lognames[loglevels[i]:lower()] = i end
 
 local logcolors = {[0] = '\27[90m', '\27[97m', '\27[36m', '\27[93m', '\27[31m', '\27[95m', '\27[96m'}
 
+-- TODO: avoid __tostring injection
 local function concat(t, sep, i, j)
     if i >= j then return tostring(t[i])
     else return tostring(t[i]) .. sep .. concat(t, sep, i + 1, j) end
@@ -289,6 +290,7 @@ local oldpanic = panic
 -- @tparam[opt] any message A message to display on screen
 function panic(message)
     xpcall(function()
+        currentTTY = TTY[1]
         TTY[1].isLocked = false
         syslog.log({level = "panic"}, "Kernel panic:", message)
         if debug then

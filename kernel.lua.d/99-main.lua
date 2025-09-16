@@ -37,78 +37,66 @@ debug.protect(coroutine.yield)
 eventHooks.key = eventHooks.key or {}
 eventHooks.key[#eventHooks.key+1] = function(ev)
     if keysHeld.ctrl and keysHeld.shift and ev[2] == keys.f10 then
-        term.clear()
-        term.setCursorPos(1, 1)
-        term.write("Entering debug console.")
-        local y = 2
+        local old = currentTTY
+        local tty = terminal.makeTTY(term, term.getSize())
+        currentTTY = tty
+        terminal.write(tty, "Entering debug console.\n")
+        terminal.redraw(tty, true)
         local running = true
-        term.setCursorPos(1, y)
         while running do
-            local line = ""
-            local w, h = term.getSize()
-            term.write("lua> ")
-            term.setCursorBlink(true)
+            terminal.write(tty, "lua> ")
+            terminal.redraw(tty)
             while true do
                 local ev = {yield()}
                 if ev[1] == "char" or ev[1] == "paste" then
-                    line = line .. ev[2]
-                    term.write(ev[2])
+                    if tty.flags.cbreak then tty.buffer = tty.buffer .. ev[2]
+                    else tty.preBuffer = tty.preBuffer .. ev[2] end
+                    if tty.flags.echo then terminal.write(tty, ev[2]) terminal.redraw(tty) end
                 elseif ev[1] == "key" then
-                    if ev[2] == keys.backspace and #line > 0 then -- backspace
-                        line = line:sub(1, -2)
-                        term.setCursorPos(term.getCursorPos() - 1, y)
-                        term.write(" ")
-                        term.setCursorPos(term.getCursorPos() - 1, y)
-                    elseif ev[2] == keys.enter then -- enter
+                    if ev[2] == keys.enter then
+                        if tty.flags.cbreak then
+                            tty.buffer = tty.buffer .. "\n"
+                        else
+                            tty.buffer = tty.buffer .. tty.preBuffer .. "\n"
+                            tty.preBuffer = ""
+                        end
+                        if tty.flags.echo then terminal.write(tty, "\n") terminal.redraw(tty) end
                         break
+                    elseif ev[2] == keys.backspace then
+                        if tty.flags.cbreak then
+                            -- TODO: uh, what is this supposed to be?
+                        elseif #tty.preBuffer > 0 then
+                            tty.preBuffer = tty.preBuffer:sub(1, -2)
+                            if tty.flags.echo then terminal.write(tty, "\b \b") terminal.redraw(tty) end
+                        end
                     end
                 end
             end
-            y = y + 1
-            if y > h then
-                y = y - 1
-                term.scroll(1)
-            end
-            term.setCursorPos(1, y)
-            local fn, err = load("return " .. line, "=lua", "t", setmetatable({exit = function() running = false end}, {__index = _G}))
-            if not fn then fn, err = load(line, "=lua", "t", setmetatable({exit = function() running = false end}, {__index = _G})) end
+            local fn, err = load("return " .. tty.buffer, "=lua", "t", setmetatable({exit = function() running = false end, ps = function() local retval = {} for k, v in pairs(processes) do retval[k] = v.name end return retval end}, {__index = _G}))
+            if not fn then fn, err = load(tty.buffer, "=lua", "t", setmetatable({exit = function() running = false end, ps = function() local retval = {} for k, v in pairs(processes) do retval[k] = v.name end return retval end}, {__index = _G})) end
+            tty.buffer = ""
             if fn then
                 local res = table.pack(pcall(fn))
                 if res[1] then
                     for i = 2, res.n do
-                        term.write(tostring(res[i]))
-                        y = y + 1
-                        if y > h then
-                            y = y - 1
-                            term.scroll(1)
+                        if pretty_print then pretty_print(tty, res[i]) else
+                            local s = tostring(res[i]) -- TODO: avoid __tostring injection (?)
+                            if type(res[i]) == "table" then
+                                local ok, ss = pcall(serialize, res[i])
+                                if ok and ss then s = ss end
+                            end
+                            terminal.write(tty, s .. "\n")
                         end
-                        term.setCursorPos(1, y)
                     end
                 else
-                    term.setTextColor(16384)
-                    term.write(res[2])
-                    term.setTextColor(1)
-                    y = y + 1
-                    if y > h then
-                        y = y - 1
-                        term.scroll(1)
-                    end
-                    term.setCursorPos(1, y)
+                    terminal.write(tty, "\x1b[31m" .. res[2] .. "\x1b[0m\n")
                 end
             else
-                term.setTextColor(16384)
-                term.write(err)
-                term.setTextColor(1)
-                y = y + 1
-                if y > h then
-                    y = y - 1
-                    term.scroll(1)
-                end
-                term.setCursorPos(1, y)
+                terminal.write(tty, "\x1b[31m" .. err .. "\x1b[0m\n")
             end
+            terminal.redraw(tty)
         end
-        term.setCursorBlink(false)
-        term.clear()
+        currentTTY = old
         terminal.redraw(currentTTY, true)
     end
 end

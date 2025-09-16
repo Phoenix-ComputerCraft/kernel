@@ -907,10 +907,11 @@ function drivers.peripheral_modem.methods:open(process, channel)
 end
 
 function drivers.peripheral_modem.methods:isOpen(process, channel)
-    return self.internalState.modem[channel] and self.internalState.modem[channel][process]
+    return not not (self.internalState.modem[channel] and self.internalState.modem[channel][process])
 end
 
 function drivers.peripheral_modem.methods:close(process, channel)
+    if not self.internalState.modem[channel] then return end
     self.internalState.modem[channel][process] = nil
     if not next(self.internalState.modem[channel]) then
         self.internalState.peripheral.call(self.id, "close", channel)
@@ -920,10 +921,12 @@ end
 
 function drivers.peripheral_modem.methods:closeAll(process)
     for channel = 0, 65535 do
-        self.internalState.modem[channel][process] = nil
-        if not next(self.internalState.modem[channel]) then
-            self.internalState.peripheral.call(self.id, "close", channel)
-            self.internalState.modem[channel] = nil
+        if self.internalState.modem[channel] then
+            self.internalState.modem[channel][process] = nil
+            if not next(self.internalState.modem[channel]) then
+                self.internalState.peripheral.call(self.id, "close", channel)
+                self.internalState.modem[channel] = nil
+            end
         end
     end
 end

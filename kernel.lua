@@ -1,11 +1,13 @@
--- Phoenix Kernel v0.0.8
+-- Phoenix Kernel v0.0.9
 --
 -- Copyright (c) 2021-2025 JackMacWindows. All rights reserved.
 -- This is a PRE-RELEASE BUILD! Redistribution of this file is not permitted.
 -- See the Phoenix EULA (https://github.com/Phoenix-ComputerCraft/kernel/blob/master/LICENSE.md) for more information.
 
+if _ENV ~= _G then error("Phoenix must be run in the global environment, with a bootloader such as pxboot or UnBIOS. It cannot be run as a normal program.") end
+
 --- Version number of Phoenix.
-PHOENIX_VERSION = "0.0.8"
+PHOENIX_VERSION = "0.0.9"
 --- Build string of Phoenix.
 PHOENIX_BUILD = "PRERELEASE NONFREE $BUILD_DATE$"
 

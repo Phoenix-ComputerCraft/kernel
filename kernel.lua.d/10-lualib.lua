@@ -112,6 +112,7 @@ function createLuaLib(process)
 
     function G.loadfile(path, mode, env)
         if env == nil and type(mode) == "table" then env, mode = mode, nil end
+        if path == nil then path = io.stdin:read("*a") end
         if type(path) ~= "string" then error("bad argument #1 (expected string, got " .. type(path) .. ")", 2) end
         if mode ~= nil and type(mode) ~= "string" then error("bad argument #2 (expected string, got " .. type(mode) .. ")", 2) end
         if env ~= nil and type(env) ~= "table" then error("bad argument #3 (expected table, got " .. type(env) .. ")", 2) end
@@ -260,6 +261,13 @@ function createLuaLib(process)
         end
     }
 
+    for _, v in ipairs{io_stdin, io_stdout, io_stderr, io_infile, io_outfile} do
+        for _, f in pairs(v) do
+            local ok, env = pcall(getfenv, f)
+            if ok and env then setfenv(f, G) debug.protect(f) end
+        end
+    end
+
     G.io = {
         close = function(file)
             if file == nil then io_output:close()
@@ -312,6 +320,7 @@ function createLuaLib(process)
         popen = function(path, mode)
             expect(1, path, "string")
             mode = expect(2, mode, "string", "nil") or "r"
+            -- TODO: we may want to synchronize access to the buffer(s)
             if mode ~= "r" and mode ~= "w" and mode ~= "rw" then error("bad argument #2 (invalid mode)", 2) end
             if mode == "rw" then
                 local ibuffer, obuffer = "", ""
@@ -323,7 +332,7 @@ function createLuaLib(process)
                         ibuffer = ibuffer:sub(n + 1)
                         return s
                     else
-                        local s, e = ibuffer:match "([^\n]*)\n*()"
+                        local s, e = ibuffer:match "([^\n]*\n?)()"
                         ibuffer = ibuffer:sub(e)
                         return s
                     end
@@ -345,17 +354,19 @@ function createLuaLib(process)
                             obuffer = obuffer:sub(n + 1)
                             return s
                         else
-                            local s, e = obuffer:match "([^\n]*)\n*()"
-                            obuffer = obuffer:sub(e)
+                            local s = obuffer:byte()
+                            obuffer = obuffer:sub(2)
                             return s
                         end
                     end,
                     readLine = function()
+                        if obuffer == "" then return nil end
                         local s, e = obuffer:match "([^\n]*)\n*()"
                         obuffer = obuffer:sub(e)
                         return s
                     end,
                     readAll = function()
+                        if obuffer == "" then return nil end
                         local s = obuffer
                         obuffer = ""
                         return s
@@ -504,6 +515,11 @@ function createLuaLib(process)
     }
 
     G.debug = deepcopy(debug) -- since debug is protected, we can pretty much just stick it in here and be alright
+    local registry = {}
+    function G.debug.getregistry()
+        return registry
+    end
+    setfenv(G.debug.getregistry, G) debug.protect(G.debug.getregistry)
 
     local oldresume, yield, sethook, getinfo, getCurrentThread, tpack, tunpack, next, xpcall, wakeup = coroutine.resume, coroutine.yield, debug.sethook, debug.getinfo, getCurrentThread, table.pack, table.unpack, next, xpcall, wakeup
     local hooks = debugHooks
@@ -617,6 +633,8 @@ function createLuaLib(process)
             if not process.debugging then sethook(coro, process.hookf, "", process.quantum) end
         end
     end
+    setfenv(G.debug.gethook, G) debug.protect(G.debug.gethook)
+    setfenv(G.debug.sethook, G) debug.protect(G.debug.sethook)
     function G.pcall(f, ...)
         return xpcall(f, function(err)
             if process.debugging then
