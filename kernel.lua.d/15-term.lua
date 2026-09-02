@@ -35,6 +35,9 @@ function terminal.makeTTY(term, width, height)
         processList = {},
         eof = false,
         term = term,
+        id = nil,
+        process = nil,
+        scrollBuffer = nil,
     }
     for y = 1, height do
         retval[y] = {(' '):rep(width), ('0'):rep(width), ('f'):rep(width)}
@@ -321,6 +324,8 @@ local function nextline(tty)
     local height = size.height
     if y > height then
         --table.remove(tty, 1)
+        local scroll = tty.scrollBuffer
+        if scroll then scroll[#scroll+1] = tty[1] end
         local dirtyLines = tty.dirtyLines
         for i = 1, height - 1 do
             tty[i] = tty[i+1]
@@ -890,6 +895,7 @@ function terminal.openterm(tty, process)
 
     local win = setmetatable({}, {__name = "Terminal"})
     local redraw = terminal.redraw
+    local isptty = tty.id ~= nil
     local expect = expect
     tty.screenHandle = win
 
@@ -921,7 +927,7 @@ function terminal.openterm(tty, process)
         buffer[buffer.cursor.y][3] = buffer[buffer.cursor.y][3]:sub(1, buffer.cursor.x - 1) .. buffer.colors.bg:rep(#text) .. buffer[buffer.cursor.y][3]:sub(buffer.cursor.x + #text)
         buffer.cursor.x = buffer.cursor.x + ntext
         buffer.dirtyLines[buffer.cursor.y] = true
-        --redraw(tty)
+        if isptty then redraw(tty) end
     end
 
     function win.blit(text, fg, bg)
@@ -934,7 +940,7 @@ function terminal.openterm(tty, process)
         if buffer.cursor.y < 1 or buffer.cursor.y > size.height then return
         elseif buffer.cursor.x > size.width or buffer.cursor.x < 1 - #text then
             buffer.cursor.x = buffer.cursor.x + #text
-            redraw(tty)
+            if isptty then redraw(tty) end
             return
         elseif buffer.cursor.x < 1 then
             text, fg, bg = text:sub(-buffer.cursor.x + 2), fg:sub(-buffer.cursor.x + 2), bg:sub(-buffer.cursor.x + 2)
@@ -947,7 +953,7 @@ function terminal.openterm(tty, process)
         buffer[buffer.cursor.y][3] = buffer[buffer.cursor.y][3]:sub(1, buffer.cursor.x - 1) .. bg .. buffer[buffer.cursor.y][3]:sub(buffer.cursor.x + #bg)
         buffer.cursor.x = buffer.cursor.x + ntext
         buffer.dirtyLines[buffer.cursor.y] = true
-        --redraw(tty)
+        if isptty then redraw(tty) end
     end
 
     function win.clear()
@@ -956,7 +962,7 @@ function terminal.openterm(tty, process)
             buffer[y] = {(' '):rep(size.width), buffer.colors.fg:rep(size.width), buffer.colors.bg:rep(size.width)}
             buffer.dirtyLines[y] = true
         end
-        --redraw(tty)
+        if isptty then redraw(tty) end
     end
 
     function win.clearLine()
@@ -964,7 +970,7 @@ function terminal.openterm(tty, process)
         if buffer.cursor.y >= 1 and buffer.cursor.y <= size.height then
             buffer[buffer.cursor.y] = {(' '):rep(size.width), buffer.colors.fg:rep(size.width), buffer.colors.bg:rep(size.width)}
             buffer.dirtyLines[buffer.cursor.y] = true
-            --redraw(tty)
+            if isptty then redraw(tty) end
         end
     end
 
@@ -979,7 +985,7 @@ function terminal.openterm(tty, process)
         expect(2, cy, "number")
         if cx == buffer.cursor.x and cy == buffer.cursor.y then return end
         buffer.cursor.x, buffer.cursor.y = math.floor(cx), math.floor(cy)
-        --redraw(tty)
+        if isptty then redraw(tty) end
     end
 
     function win.getCursorBlink()
@@ -991,7 +997,7 @@ function terminal.openterm(tty, process)
         if not win then error("terminal is already closed", 2) end
         expect(1, b, "boolean")
         buffer.cursorBlink = b
-        --redraw(tty)
+        if isptty then redraw(tty) end
     end
 
     function win.isColor()
@@ -1017,7 +1023,7 @@ function terminal.openterm(tty, process)
             for i = 1, -lines do buffer[i] = {(' '):rep(size.width), buffer.colors.fg:rep(size.width), buffer.colors.bg:rep(size.width)} end
         else return end
         for i = 1, size.height do buffer.dirtyLines[i] = true end
-        --redraw(tty)
+        if isptty then redraw(tty) end
     end
 
     function win.getTextColor()
@@ -1064,7 +1070,7 @@ function terminal.openterm(tty, process)
         if b < 0 or b > 1 then error("bad argument #4 (value out of range)", 2) end
         buffer.palette[math.floor(color)] = {r, g, b}
         buffer.dirtyPalette[math.floor(color)] = true
-        --redraw(tty)
+        if isptty then redraw(tty) end
     end
 
     function win.getLine(y)
@@ -1137,6 +1143,7 @@ function terminal.opengfx(tty, process)
 
     local win = setmetatable({}, {__name = "GFXTerminal"})
     local redraw = terminal.redraw
+    local isptty = tty.id ~= nil
     local expect = expect
     tty.screenHandle = win
 
@@ -1156,7 +1163,7 @@ function terminal.opengfx(tty, process)
     function win.clear()
         if not win then error("terminal is already closed", 2) end
         for y = 1, size.height * 9 do buffer[y] = ('\15'):rep(size.width * 6) end
-        redraw(tty, true)
+        if not buffer.frozen and isptty then redraw(tty) end
     end
 
     function win.getPixel(x, y)
@@ -1180,7 +1187,7 @@ function terminal.opengfx(tty, process)
         x, y = math.floor(x), math.floor(y)
         buffer[y+1] = buffer[y+1]:sub(1, x) .. string.char(color) .. buffer[y+1]:sub(x + 2)
         buffer.dirtyRects[#buffer.dirtyRects+1] = {x = x, y = y, color = color}
-        --if not buffer.frozen then redraw(tty) end
+        if not buffer.frozen and isptty then redraw(tty) end
     end
 
     function win.getPixels(x, y, width, height, asStr)
@@ -1245,7 +1252,7 @@ function terminal.opengfx(tty, process)
             end
         end
         buffer.dirtyRects[#buffer.dirtyRects+1] = rect
-        --if not buffer.frozen then redraw(tty) end
+        if not buffer.frozen and isptty then redraw(tty) end
     end
 
     function win.getFrozen()
@@ -1257,7 +1264,7 @@ function terminal.opengfx(tty, process)
         if not win then error("terminal is already closed", 2) end
         expect(1, f, "boolean")
         buffer.frozen = f
-        --if not buffer.frozen then redraw(tty) end
+        if not buffer.frozen and isptty then redraw(tty) end
     end
 
     function win.getPaletteColor(color)
@@ -1280,7 +1287,7 @@ function terminal.opengfx(tty, process)
         expect.range(color, 0, 255)
         buffer.palette[color] = {r, g, b}
         buffer.dirtyPalette[color] = true
-        --if not buffer.frozen then redraw(tty) end
+        if not buffer.frozen and isptty then redraw(tty) end
     end
 
     local nativePaletteColor = term.nativePaletteColor
@@ -1316,17 +1323,22 @@ function syscalls.mktty(process, thread, width, height)
     local tty = terminal.makeTTY(term, width, height)
     tty.id = math.random(0, 0x7FFFFFFF)
     tty.process = process
-    local mt = {__index = tty, __metatable = {__name = "TTY"}}
+    tty.scrollBuffer = {}
+    local mt = {__index = function(_, idx)
+        if idx == "process" or idx == "frontmostProcess" or idx == "processList" or idx == "term" then return nil end
+        return tty[idx]
+    end, __metatable = {__name = "TTY"}}
     local retval = setmetatable({}, mt)
     local do_syscall = do_syscall
     function retval.sendEvent(event, param)
         return do_syscall("__ttyevent", retval, event, param)
     end
     function retval.write(text)
-        return do_syscall("__ttyevent", retval, "paste", tostring(text))
+        return do_syscall("__ttyevent", retval, "paste", {text = tostring(text)})
     end
     debug.protect(retval.sendEvent)
     debug.protect(retval.write)
+    debug.protect(mt.__index)
     mt.__newindex = function() error("cannot modify TTY", 2) end
     terminal.userTTYs[retval] = tty
     process.dependents[#process.dependents+1] = {gc = function() terminal.userTTYs[retval] = nil end}

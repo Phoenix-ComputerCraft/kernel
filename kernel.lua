@@ -6,8 +6,20 @@
 
 if _ENV ~= _G then error("Phoenix must be run in the global environment, with a bootloader such as pxboot or UnBIOS. It cannot be run as a normal program.") end
 
+-- Move the environment to a new table in order to mitigate _G-based attacks
+do
+    local env = {}
+    local oldenv = _ENV
+    for k, v in pairs(oldenv) do env[k] = v end
+    env._G = env
+    if env._ENV then env._ENV = env end
+    if _VERSION == "Lua 5.1" then setfenv(1, env)
+    else _ENV = env end
+    for k in pairs(oldenv) do oldenv[k] = nil end
+end
+
 --- Version number of Phoenix.
-PHOENIX_VERSION = "0.0.9"
+PHOENIX_VERSION = "0.0.10"
 --- Build string of Phoenix.
 PHOENIX_BUILD = "PRERELEASE NONFREE $BUILD_DATE$"
 

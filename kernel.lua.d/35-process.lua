@@ -40,6 +40,7 @@ local process_template = {
         [0] = thread_template
     },
     globalMetatables = {},
+    pendingRelease = 0,
 }
 
 local nextProcessID = 1
@@ -478,6 +479,49 @@ function syscalls.nice(process, thread, level, pid)
     target.nice = level
     target.quantum = args.quantum * 10^(level / -10)
     if args.preemptive then for _, t in pairs(target.threads) do debug.sethook(t.coro, preempt_hook, "", target.quantum) end end
+end
+
+---@param process Process
+---@param thread Thread
+function syscalls.releasechild(process, thread, pid, newparent)
+    expect(1, pid, "number")
+    expect(2, newparent, "number")
+    local child = processes[pid]
+    if child == nil then error("Process does not exist") end
+    if child.parent ~= process.id then error("Process is not owned by current process") end
+    if processes[newparent] == nil then error("New parent process does not exist") end
+    child.pendingRelease = newparent
+end
+
+---@param process Process
+---@param thread Thread
+function syscalls.acceptchild(process, thread, pid, takestdio)
+    expect(1, pid, "number")
+    expect(2, takestdio, "boolean", "nil")
+    local child = processes[pid]
+    if child == nil then error("Process does not exist") end
+    if child.pendingRelease ~= process.id then error("Process is not released to current process") end
+    child.parent = process.id
+    child.pendingRelease = nil
+    if takestdio then
+        child.stdin = process.stdin
+        child.stdout = process.stdout
+        child.stderr = process.stderr
+        if child.stdin and child.stdin.isTTY and not child.stdin.isLocked then
+            child.stdin.processList[#child.stdin.processList+1] = child.stdin.frontmostProcess
+            child.stdin.frontmostProcess = child
+            child.stdin.preBuffer = ""
+            if discord and child.stdout == currentTTY then discord("Phoenix", "Executing " .. child.name) end
+        end
+        if child.stdout and child.stdout.isTTY and not child.stdout.isLocked and child.stdout.frontmostProcess ~= child then
+            child.stdout.processList[#child.stdout.processList+1] = child.stdout.frontmostProcess
+            child.stdout.frontmostProcess = child
+        end
+        if child.stderr and child.stderr.isTTY and not child.stderr.isLocked and child.stderr.frontmostProcess ~= child then
+            child.stderr.processList[#child.stderr.processList+1] = child.stderr.frontmostProcess
+            child.stderr.frontmostProcess = child
+        end
+    end
 end
 
 ---@param process Process

@@ -79,7 +79,17 @@ filesystems = {
                 worldPermissions = {read = true, write = false, execute = true},
                 setuser = false
             },
-            contents = {}
+            contents = {
+                ["meta.ltn"] = {
+                    meta = {
+                        type = "file",
+                        owner = nil,
+                        permissions = {},
+                        worldPermissions = {read = false, write = false, execute = false},
+                        setuser = false
+                    }
+                }
+            }
         },
         metapath = "/meta.ltn",
         lastDispatch = 0
@@ -567,7 +577,7 @@ function filesystems.craftos:setmeta(user, path, meta, nolink)
     else stack[#stack].contents[name] = nil end
     if os.epoch "utc" - self.lastDispatch > 1000 then
         local file = assert(fs.open(self.metapath, "w"))
-        file.write(serialize(self.meta, {compact = true}))
+        file.write(serialize(self.meta, {minified = true}))
         file.close()
         self.lastDispatch = os.epoch "utc"
     end

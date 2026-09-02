@@ -172,6 +172,43 @@ function createRequire(process, G)
             return libraryLoader, path .. "\0" .. n, path .. ":" .. n
         end,
         function(name)
+            local n, libname = name:match "^(.+%.)([^%.]+)$"
+            if not n then libname = name:match "^([^%.]+)$" end
+            name = n or ""
+            local path = package.path
+            local msg = ""
+            for p in path:gmatch "[^;]+" do
+                local pp = p:gsub("%?", name:gsub("%.", "/") .. "lib" .. libname .. ".a", nil)
+                local file, err = do_syscall("open", pp, "r")
+                if file then
+                    file.close()
+                    return fileLoader, pp, pp
+                else
+                    msg = msg .. "\t" .. pp .. ": " .. err .. "\n"
+                end
+            end
+            return nil, msg
+        end,
+        function(name)
+            if not name:find "%." then return nil end
+            local n, libname, filename = name:match "^(.+%.)([^%.]+)%.([^%.]+)$"
+            if not n then libname, filename = name:match "^([^%.]+)%.([^%.]+)$" end
+            name = n or ""
+            local path = package.path
+            local msg = ""
+            for p in path:gmatch "[^;]+" do
+                local pp = p:gsub("%?", name:gsub("%.", "/") .. "lib" .. libname .. ".a/" .. filename, nil)
+                local file, err = do_syscall("open", pp, "r")
+                if file then
+                    file.close()
+                    return fileLoader, pp, pp
+                else
+                    msg = msg .. "\t" .. pp .. ": " .. err .. "\n"
+                end
+            end
+            return nil, msg
+        end,
+        function(name)
             if #localLoaders > 0 then return localLoaders[#localLoaders](name) end
             return nil, "no local loaders found"
         end

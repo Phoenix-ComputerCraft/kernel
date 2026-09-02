@@ -142,6 +142,7 @@ end
 -- @treturn string The serialized Lua representation of the object
 function serialize(val, opts)
     expect(2, opts, "table", "nil")
+    if opts and opts.minified == nil then opts.minified = opts.compact end
     return lua_serialize(val, {}, opts or {}, 1)
 end
 
@@ -184,22 +185,25 @@ if not pcall(load, "return", "=test", "t", {}) then
             if chunk:sub(1, 4) == "\27Lua" then
                 if mode == nil or mode:find "b" then
                     local fn, err = old_loadstring(chunk, name)
-                    if fn and env then setfenv(fn, env) end
+                    if fn then setfenv(fn, env or _G) end
                     return fn, err
                 else return nil, "attempt to load a binary chunk (mode is '" .. (mode or "bt") .. "')" end
             else
                 if mode == nil or mode:find "t" then
                     local fn, err = old_loadstring(chunk, name)
-                    if fn and env then setfenv(fn, env) end
+                    if fn then setfenv(fn, env or _G) end
                     return fn, err
                 else return nil, "attempt to load a text chunk (mode is '" .. (mode or "bt") .. "')" end
             end
         else
             local fn, err = old_load(chunk, name)
-            if fn then setfenv(fn, env) end
+            if fn then setfenv(fn, env or _G) end
             return fn, err
         end
     end
+else
+    local old_load = load
+    function load(chunk, name, mode, env) return old_load(chunk, name, mode, env or _G) end
 end
 loadstring = nil -- Make sure loadstring is always gone
 

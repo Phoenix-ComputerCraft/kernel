@@ -23,6 +23,9 @@ local driverTemplate = {
 local localPeripherals = {top = true, bottom = true, left = true, right = true, front = true, back = true}
 
 local drivers = {}
+---@type ({coro: thread, callback: function, error: fun(err: string)})[]
+local taskQueue = {}
+local nextTaskID = 1
 
 function getNodeById(name)
     if localPeripherals[name] then
@@ -58,6 +61,13 @@ local function shadowTable(process, mt)
     return setmetatable({}, mt)
 end
 
+local function wrapModem(modem)
+    return {
+        call = function(...) return peripheral.call(modem, "callRemote", ...) end,
+        getMethods = function(...) return peripheral.call(modem, "getMethodsRemote", ...) end,
+    }
+end
+
 local function peripheralTypeCallback(driver, type)
     return function(node)
         local types, fn
@@ -71,6 +81,49 @@ local function register(type)
     return hardware.listen(peripheralTypeCallback(drivers["peripheral_" .. type], type), deviceTreeRoot)
 end
 
+local function _addTask(process, uuid, func, ...)
+    local id = nextTaskID
+    nextTaskID = nextTaskID + 1
+    local res = {}
+    local task = {
+        coro = coroutine.create(func),
+        callback = function(...)
+            res.done = true
+            res.n = select("#", ...)
+            for i = 1, res.n do res[i] = select(i, ...) end
+            process.eventQueue[#process.eventQueue+1] = {"task_complete", {device = uuid, id = id, n = select("#", ...), ...}}
+            return true
+        end,
+        error = function(err)
+            res.done = true
+            res.error = err
+            process.eventQueue[#process.eventQueue+1] = {"task_complete", {device = uuid, id = id, error = err}}
+            return true
+        end
+    }
+    local ok, err = coroutine.resume(task.coro, ...)
+    if not ok then
+        res.done = true
+        res.error = err
+        process.eventQueue[#process.eventQueue+1] = {"task_complete", {device = uuid, id = id, error = err}}
+        return id, res
+    end
+    taskQueue[#taskQueue+1] = task
+    return id, res
+end
+
+local function addTask(...)
+    local id = _addTask(...)
+    return id
+end
+
+local function awaitTask(process, uuid, func, ...)
+    local id, res = _addTask(process, uuid, func, ...)
+    while not res.done do coroutine.yield() end
+    if res.error then error(res.error, 2) end
+    return table.unpack(res, 1, res.n)
+end
+
 local function noArgMethod(method)
     return function(self)
         return self.internalState.peripheral.call(self.id, method)
@@ -81,6 +134,18 @@ local function noArgRootMethod(method)
     return function(self, process)
         if process.user ~= "root" then error("Permission denied", 0) end
         return self.internalState.peripheral.call(self.id, method)
+    end
+end
+
+local function noArgSyncMethod(method)
+    return function(self, process)
+        return awaitTask(process, self.uuid, self.internalState.peripheral.call, self.id, method)
+    end
+end
+
+local function noArgAsyncMethod(method)
+    return function(self, process)
+        return addTask(process, self.uuid, self.internalState.peripheral.call, self.parent.id, method)
     end
 end
 
@@ -103,6 +168,55 @@ local function oneArgRootMethod(method)
             return self.internalState.peripheral.call(self.id, method, value)
         end
     end
+end
+
+local function oneArgSyncMethod(method)
+    return function(...)
+        local types = {...}
+        return function(self, process, value)
+            expect(1, value, table.unpack(types))
+            return awaitTask(process, self.uuid, self.internalState.peripheral.call, self.id, method, value)
+        end
+    end
+end
+
+local function oneArgAsyncMethod(method)
+    return function(...)
+        local types = {...}
+        return function(self, process, value)
+            expect(1, value, table.unpack(types))
+            return addTask(process, self.uuid, self.internalState.peripheral.call, self.parent.id, method, value)
+        end
+    end
+end
+
+local function genericDriver(peripheral, name, typ)
+    local driver = {
+        name = "generic",
+        type = typ,
+        properties = {},
+        methods = {}
+    }
+    for _, func in ipairs(peripheral.getMethods(name)) do
+        driver.methods[func] = function(self, process, ...) return peripheral.call(name, func, ...) end
+        if func:match "^get[A-Z]" then driver.properties[#driver.properties+1] = func:gsub("^get([A-Z])", string.lower) end
+    end
+    return driver
+end
+
+local function findTargetPeripheral(self, name, driver, typ, asyncType)
+    if self.drivers[asyncType] then self = self.parent end
+    local target
+    local targets = {hardware.get(name)}
+    if #targets == 1 then target = targets[1]
+    else for _, v in ipairs(targets) do if v.parent == self.parent or (v.drivers[asyncType] and v.parent.parent == self.parent) then target = v break end end end
+    if not target then error("No such device", 0) end
+    if target.drivers[asyncType] then target = target.parent end
+    if target.parent ~= self.parent then error("Devices must be on the same network", 0) end
+    local ok = false
+    for _, v in ipairs(target.drivers) do if v == driver then ok = true break end end
+    if not ok then error("Target device is not a " .. typ .. " block", 0) end
+    return target
 end
 
 --#region Root driver
@@ -201,6 +315,7 @@ function drivers.root:init()
     end
     hardware.register(hardware.add(deviceTreeRoot, "lo"), drivers.loopback_modem)
     registerLoopback()
+    if turtle then hardware.register(hardware.add(deviceTreeRoot, "turtle"), drivers.turtle) end
     for v in pairs(localPeripherals) do
         if peripheral.isPresent(v) then
             hardware.add(self, v)
@@ -224,7 +339,12 @@ eventHooks.peripheral = eventHooks.peripheral or {}
 eventHooks.peripheral[#eventHooks.peripheral+1] = function(ev)
     if localPeripherals[ev[2]] then
         local node, err = hardware.add(deviceTreeRoot, ev[2])
-        if node then hardware.broadcast(deviceTreeRoot, "device_added", {device = hardware.path(node)})
+        if node then
+            if not next(node.drivers) then
+                syslog.log({module = "Hardware", level = "warn"}, "No suitable driver found for " .. hardware.path(node) .. ", adding generic fallback")
+                for _, typ in ipairs{peripheral.getType(ev[2])} do hardware.register(node, genericDriver(peripheral, ev[2], typ)) end
+            end
+            hardware.broadcast(deviceTreeRoot, "device_added", {device = hardware.path(node)})
         else syslog.log({level = "error", module = "Hardware"}, "Could not create new device: " .. err) end
     else
         -- We don't know the parent of this peripheral, so we have to traverse all modems :(
@@ -232,7 +352,12 @@ eventHooks.peripheral[#eventHooks.peripheral+1] = function(ev)
             if peripheral.getType(k) == "modem" and not peripheral.call(k, "isWireless") and peripheral.call(k, "isPresentRemote", ev[2]) then
                 if not deviceTreeRoot.children[k] then hardware.add(deviceTreeRoot, k) end
                 local node, err = hardware.add(deviceTreeRoot.children[k], ev[2])
-                if node then hardware.broadcast(deviceTreeRoot.children[k], "device_added", {device = hardware.path(node)})
+                if node then
+                    if not next(node.drivers) then
+                        syslog.log({module = "Hardware", level = "warn"}, "No suitable driver found for " .. hardware.path(node) .. ", adding generic fallback")
+                        for _, typ in ipairs{peripheral.call(k, "getTypeRemote", ev[2])} do hardware.register(node, genericDriver(wrapModem(k), ev[2], typ)) end
+                    end
+                    hardware.broadcast(deviceTreeRoot.children[k], "device_added", {device = hardware.path(node)})
                 else syslog.log({level = "error", module = "Hardware"}, "Could not create new device: " .. err) end
                 break
             end
@@ -250,6 +375,30 @@ eventHooks.peripheral_detach[#eventHooks.peripheral_detach+1] = function(ev)
     local path, parent = hardware.path(node), node.parent
     hardware.remove(node)
     hardware.broadcast(parent, "device_removed", {device = path})
+end
+
+eventHooks.task_complete = eventHooks.task_complete or {}
+eventHooks.task_complete[#eventHooks.task_complete+1] = function(ev)
+    for i, v in ipairs(taskQueue) do
+        local res = table.pack(coroutine.resume(v.coro, table.unpack(ev)))
+        if coroutine.status(v.coro) == "dead" then
+            table.remove(taskQueue, i)
+            if res[1] then return v.callback(table.unpack(res, 2, res.n))
+            else return v.error(res[2]) end
+        end
+    end
+end
+
+eventHooks.turtle_response = eventHooks.turtle_response or {}
+eventHooks.turtle_response[#eventHooks.turtle_response+1] = function(ev)
+    for i, v in ipairs(taskQueue) do
+        local res = table.pack(coroutine.resume(v.coro, table.unpack(ev)))
+        if coroutine.status(v.coro) == "dead" then
+            table.remove(taskQueue, i)
+            if res[1] then return v.callback(table.unpack(res, 2, res.n))
+            else return v.error(res[2]) end
+        end
+    end
 end
 
 rootDriver = drivers.root
@@ -438,46 +587,62 @@ drivers.peripheral_fluid_storage = {
     methods = {}
 }
 
-drivers.peripheral_fluid_storage.methods.getTanks = noArgMethod "tanks"
+drivers.peripheral_fluid_storage.methods.getTanks = noArgSyncMethod "tanks"
 
 function drivers.peripheral_fluid_storage.methods:push(process, to, limit, name)
     expect(1, to, "string")
     expect(2, limit, "number", "nil")
     expect(3, name, "string", "nil")
-    local target
-    local targets = {hardware.get(to)}
-    if #targets == 1 then target = targets[1]
-    else for _, v in ipairs(targets) do if v.parent == self.parent then target = v break end end end
-    if not target then error("No such device", 0)
-    elseif target.parent ~= self.parent then error("Devices must be on the same network", 0) end
-    local ok = false
-    for _, v in ipairs(target.drivers) do if v == drivers.peripheral_fluid_storage then ok = true break end end
-    if not ok then error("Target device is not a fluid storage block", 0) end
-    return self.internalState.peripheral.call(self.id, "pushFluid", target.id, limit, name)
+    local target = findTargetPeripheral(self, to, drivers.peripheral_fluid_storage, "fluid storage", "fluid_storage:async")
+    return awaitTask(process, self.uuid, self.internalState.peripheral.call, self.id, "pushFluid", target.id, limit, name)
 end
 
 function drivers.peripheral_fluid_storage.methods:pull(process, from, limit, name)
     expect(1, from, "string")
     expect(2, limit, "number", "nil")
     expect(3, name, "string", "nil")
-    local target
-    local targets = {hardware.get(from)}
-    if #targets == 1 then target = targets[1]
-    else for _, v in ipairs(targets) do if v.parent == self.parent then target = v break end end end
-    if not target then error("No such device", 0)
-    elseif target.parent ~= self.parent then error("Devices must be on the same network", 0) end
-    local ok = false
-    for _, v in ipairs(target.drivers) do if v == drivers.peripheral_fluid_storage then ok = true break end end
-    if not ok then error("Target device is not a fluid storage block", 0) end
-    return self.internalState.peripheral.call(self.id, "pullFluid", target.id, limit, name)
+    local target = findTargetPeripheral(self, from, drivers.peripheral_fluid_storage, "fluid storage", "fluid_storage:async")
+    return awaitTask(process, self.uuid, self.internalState.peripheral.call, self.id, "pullFluid", target.id, limit, name)
 end
 
 function drivers.peripheral_fluid_storage:init()
     checkCall(self)
     self.displayName = "Fluid storage block at " .. self.id
+    local async = hardware.add(self, "async")
+    async.internalState = self.internalState
+    hardware.register(async, drivers.peripheral_fluid_storage_async)
 end
 
 register "fluid_storage"
+
+drivers.peripheral_fluid_storage_async = {
+    name = "peripheral_fluid_storage_async",
+    type = "fluid_storage:async",
+    properties = {},
+    methods = {}
+}
+
+drivers.peripheral_fluid_storage_async.methods.getTanks = noArgAsyncMethod "tanks"
+
+function drivers.peripheral_fluid_storage_async.methods:push(process, to, limit, name)
+    expect(1, to, "string")
+    expect(2, limit, "number", "nil")
+    expect(3, name, "string", "nil")
+    local target = findTargetPeripheral(self, to, drivers.peripheral_fluid_storage, "fluid storage", "fluid_storage:async")
+    return addTask(process, self.uuid, self.internalState.peripheral.call, self.parent.id, "pushFluid", target.id, limit, name)
+end
+
+function drivers.peripheral_fluid_storage_async.methods:pull(process, from, limit, name)
+    expect(1, from, "string")
+    expect(2, limit, "number", "nil")
+    expect(3, name, "string", "nil")
+    local target = findTargetPeripheral(self, from, drivers.peripheral_fluid_storage, "fluid storage", "fluid_storage:async")
+    return addTask(process, self.uuid, self.internalState.peripheral.call, self.parent.id, "pullFluid", target.id, limit, name)
+end
+
+function drivers.peripheral_fluid_storage_async:init()
+    self.displayName = "Fluid storage block at " .. self.parent.id .. " (async)"
+end
 
 --#endregion
 --#region Generic inventory peripheral
@@ -491,25 +656,17 @@ drivers.peripheral_inventory = {
     methods = {}
 }
 
-drivers.peripheral_inventory.methods.getItems = noArgMethod "list"
-drivers.peripheral_inventory.methods.detail = oneArgMethod "getItemDetail" ("number")
-drivers.peripheral_inventory.methods.limit = oneArgMethod "getItemLimit" ("number")
+drivers.peripheral_inventory.methods.getItems = noArgSyncMethod "list"
+drivers.peripheral_inventory.methods.detail = oneArgSyncMethod "getItemDetail" ("number")
+drivers.peripheral_inventory.methods.limit = oneArgSyncMethod "getItemLimit" ("number")
 
 function drivers.peripheral_inventory.methods:push(process, to, slot, limit, toSlot)
     expect(1, to, "string")
     expect(2, slot, "number")
     expect(3, limit, "number", "nil")
     expect(4, toSlot, "number", "nil")
-    local target
-    local targets = {hardware.get(to)}
-    if #targets == 1 then target = targets[1]
-    else for _, v in ipairs(targets) do if v.parent == self.parent then target = v break end end end
-    if not target then error("No such device", 0)
-    elseif target.parent ~= self.parent then error("Devices must be on the same network", 0) end
-    local ok = false
-    for _, v in ipairs(target.drivers) do if v == drivers.peripheral_inventory then ok = true break end end
-    if not ok then error("Target device is not an inventory block", 0) end
-    return self.internalState.peripheral.call(self.id, "pushItems", target.id, slot, limit, toSlot)
+    local target = findTargetPeripheral(self, to, drivers.peripheral_inventory, "inventory", "inventory:async")
+    return awaitTask(process, self.uuid, self.internalState.peripheral.call, self.id, "pushItems", target.id, slot, limit, toSlot)
 end
 
 function drivers.peripheral_inventory.methods:pull(process, from, slot, limit, toSlot)
@@ -517,25 +674,55 @@ function drivers.peripheral_inventory.methods:pull(process, from, slot, limit, t
     expect(2, slot, "number")
     expect(3, limit, "number", "nil")
     expect(4, toSlot, "number", "nil")
-    local target
-    local targets = {hardware.get(from)}
-    if #targets == 1 then target = targets[1]
-    else for _, v in ipairs(targets) do if v.parent == self.parent then target = v break end end end
-    if not target then error("No such device", 0)
-    elseif target.parent ~= self.parent then error("Devices must be on the same network", 0) end
-    local ok = false
-    for _, v in ipairs(target.drivers) do if v == drivers.peripheral_inventory then ok = true break end end
-    if not ok then error("Target device is not an inventory block", 0) end
-    return self.internalState.peripheral.call(self.id, "pullItems", target.id, slot, limit, toSlot)
+    local target = findTargetPeripheral(self, from, drivers.peripheral_inventory, "inventory", "inventory:async")
+    return awaitTask(process, self.uuid, self.internalState.peripheral.call, self.id, "pullItems", target.id, slot, limit, toSlot)
 end
 
 function drivers.peripheral_inventory:init()
     checkCall(self)
     self.displayName = "Inventory at " .. self.id
     self.metadata.size = self.internalState.peripheral.call(self.id, "size")
+    local async = hardware.add(self, "async")
+    async.internalState = self.internalState
+    hardware.register(async, drivers.peripheral_inventory_async)
 end
 
 register "inventory"
+
+drivers.peripheral_inventory_async = {
+    name = "peripheral_inventory_async",
+    type = "inventory",
+    properties = {},
+    methods = {}
+}
+
+drivers.peripheral_inventory_async.methods.getItems = noArgAsyncMethod "list"
+drivers.peripheral_inventory_async.methods.detail = oneArgAsyncMethod "getItemDetail" ("number")
+drivers.peripheral_inventory_async.methods.limit = oneArgAsyncMethod "getItemLimit" ("number")
+
+function drivers.peripheral_inventory.methods:push(process, to, slot, limit, toSlot)
+    expect(1, to, "string")
+    expect(2, slot, "number")
+    expect(3, limit, "number", "nil")
+    expect(4, toSlot, "number", "nil")
+    local target = findTargetPeripheral(self, to, drivers.peripheral_inventory_async, "inventory", "inventory:async")
+    local id = awaitTask(process, self.uuid, self.internalState.peripheral.call, self.parent.id, "pushItems", target.id, slot, limit, toSlot)
+    return id
+end
+
+function drivers.peripheral_inventory_async.methods:pull(process, from, slot, limit, toSlot)
+    expect(1, from, "string")
+    expect(2, slot, "number")
+    expect(3, limit, "number", "nil")
+    expect(4, toSlot, "number", "nil")
+    local target = findTargetPeripheral(self, from, drivers.peripheral_inventory_async, "inventory", "inventory:async")
+    return addTask(process, self.uuid, self.internalState.peripheral.call, self.parent.id, "pullItems", target.id, slot, limit, toSlot)
+end
+
+function drivers.peripheral_inventory_async:init()
+    self.displayName = "Inventory at " .. self.parent.id .. " (async)"
+    self.metadata.size = self.internalState.peripheral.call(self.parent.id, "size")
+end
 
 --#endregion
 --#region Monitor peripheral
@@ -846,7 +1033,7 @@ local peripheralDrivers = {
     drivers.peripheral_drive, drivers.peripheral_energy_storage,
     drivers.peripheral_fluid_storage, drivers.peripheral_inventory,
     drivers.peripheral_monitor, drivers.peripheral_printer,
-    drivers.peripheral_speaker
+    drivers.peripheral_redstone_relay, drivers.peripheral_speaker
 }
 
 --- Adds a driver to the list of drivers to listen for on the computer and attached modems.
@@ -1032,6 +1219,259 @@ function drivers.loopback_modem:init()
     self.displayName = "Loopback modem"
     self.internalState.modem = {}
     self.internalState.modem.channels = {}
+end
+
+--#endregion
+--#region Turtle driver
+
+if turtle then
+
+    drivers.peripheral_workbench = {
+        name = "peripheral_workbench",
+        type = "workbench",
+        properties = {},
+        methods = {}
+    }
+
+    drivers.peripheral_workbench.methods.craft = oneArgSyncMethod "craft" ("number", "nil")
+    drivers.peripheral_workbench.methods.craftAsync = oneArgAsyncMethod "craft" ("number", "nil")
+
+    function drivers.peripheral_workbench:init()
+        checkCall(self)
+        self.displayName = "Crafting table on side " .. self.id
+    end
+
+    register "workbench"
+
+    local function directionalTurtleSyncMethod(name, typ)
+        return function(self, process, side, arg)
+            side = expect(1, side, "string", "nil") or "forward"
+            if typ then expect(2, arg, typ, "nil") end
+            if side == "forward" then return awaitTask(process, self.uuid, turtle[name], arg)
+            elseif side == "up" then return awaitTask(process, self.uuid, turtle[name .. "Up"], arg)
+            elseif side == "down" then return awaitTask(process, self.uuid, turtle[name .. "Down"], arg)
+            else error("bad argument #1 (invalid side)", 0) end
+        end
+    end
+
+    local function directionalTurtleAsyncMethod(name, typ)
+        return function(self, process, side, arg)
+            side = expect(1, side, "string", "nil") or "forward"
+            if typ then expect(2, arg, typ, "nil") end
+            if side == "forward" then return addTask(process, self.uuid, turtle[name], arg)
+            elseif side == "up" then return addTask(process, self.uuid, turtle[name .. "Up"], arg)
+            elseif side == "down" then return addTask(process, self.uuid, turtle[name .. "Down"], arg)
+            else error("bad argument #1 (invalid side)", 0) end
+        end
+    end
+
+    local function repeatTurtleSyncMethod(name)
+        return function(self, process, count)
+            count = expect(1, count, "number", "nil") or 1
+            for i = 1, count do
+                local ok, err = awaitTask(process, self.uuid, turtle[name])
+                if not ok then return false, err, i end
+            end
+            return true
+        end
+    end
+
+    local function repeatTurtleAsyncMethod(name)
+        return function(self, process, count)
+            count = expect(1, count, "number", "nil") or 1
+            local id
+            for _ = 1, count do id = addTask(process, self.uuid, turtle[name]) end
+            return id
+        end
+    end
+
+    local function noArgTurtleSyncMethod(method)
+        return function(self, process)
+            return awaitTask(process, self.uuid, turtle[method])
+        end
+    end
+
+    local function noArgTurtleAsyncMethod(method)
+        return function(self, process)
+            return addTask(process, self.uuid, turtle[method])
+        end
+    end
+
+    local function oneArgTurtleMethod(method)
+        return function(...)
+            local types = {...}
+            return function(self, process, value)
+                expect(1, value, table.unpack(types))
+                return turtle[method](value)
+            end
+        end
+    end
+
+    local function oneArgTurtleSyncMethod(method)
+        return function(...)
+            local types = {...}
+            return function(self, process, value)
+                expect(1, value, table.unpack(types))
+                return awaitTask(process, self.uuid, turtle[method], value)
+            end
+        end
+    end
+
+    local function oneArgTurtleAsyncMethod(method)
+        return function(...)
+            local types = {...}
+            return function(self, process, value)
+                expect(1, value, table.unpack(types))
+                return addTask(process, self.uuid, turtle[method], value)
+            end
+        end
+    end
+
+    drivers.turtle = {
+        name = "turtle",
+        type = "turtle",
+        properties = {
+            "itemCount",
+            "itemSpace",
+            "fuelLevel",
+            "selectedSlot",
+            "equippedLeft",
+            "equippedRight"
+        },
+        methods = {}
+    }
+
+    drivers.turtle.methods.forward = repeatTurtleSyncMethod "forward"
+    drivers.turtle.methods.back = repeatTurtleSyncMethod "back"
+    drivers.turtle.methods.left = repeatTurtleSyncMethod "left"
+    drivers.turtle.methods.right = repeatTurtleSyncMethod "right"
+    drivers.turtle.methods.turnLeft = noArgTurtleSyncMethod "turnLeft"
+    drivers.turtle.methods.turnRight = noArgTurtleSyncMethod "turnRight"
+    drivers.turtle.methods.dig = directionalTurtleSyncMethod ("dig", "string")
+    drivers.turtle.methods.place = directionalTurtleSyncMethod ("place", "string")
+    drivers.turtle.methods.attack = directionalTurtleSyncMethod ("attack", "string")
+    drivers.turtle.methods.drop = directionalTurtleSyncMethod ("drop", "number")
+    drivers.turtle.methods.suck = directionalTurtleSyncMethod ("suck", "number")
+    drivers.turtle.methods.detect = directionalTurtleSyncMethod "detect"
+    drivers.turtle.methods.compare = directionalTurtleSyncMethod "compare"
+    drivers.turtle.methods.inspect = directionalTurtleSyncMethod "inspect"
+    drivers.turtle.methods.getSelectedSlot = turtle.getSelectedSlot
+    drivers.turtle.methods.setSelectedSlot = oneArgTurtleSyncMethod "select" ("number")
+    drivers.turtle.methods.getItemCount = oneArgTurtleMethod "getItemCount" ("number", "nil")
+    drivers.turtle.methods.getItemSpace = oneArgTurtleMethod "getItemSpace" ("number", "nil")
+    drivers.turtle.methods.getFuelLevel = turtle.getFuelLevel
+    drivers.turtle.methods.refuel = oneArgTurtleSyncMethod "refuel" ("number", "nil")
+    drivers.turtle.methods.getEquippedLeft = turtle.getEquippedLeft
+    drivers.turtle.methods.getEquippedRight = turtle.getEquippedRight
+    drivers.turtle.methods.compareTo = oneArgTurtleSyncMethod "compareTo" ("number")
+
+    function drivers.turtle.methods:turnAround(process)
+        awaitTask(process, self.uuid, turtle.turnLeft)
+        awaitTask(process, self.uuid, turtle.turnLeft)
+    end
+
+    function drivers.turtle.methods:setEquippedLeft(process, slot)
+        expect(1, slot, "number", "nil")
+        if slot then assert(awaitTask(process, self.uuid, turtle.select, slot)) end
+        return awaitTask(process, self.uuid, turtle.equipLeft)
+    end
+
+    function drivers.turtle.methods:setEquippedRight(process, slot)
+        expect(1, slot, "number", "nil")
+        if slot then assert(awaitTask(process, self.uuid, turtle.select, slot)) end
+        return awaitTask(process, self.uuid, turtle.equipRight)
+    end
+
+    function drivers.turtle.methods:transferTo(process, slot, count)
+        expect(1, slot, "number")
+        expect(2, count, "number", "nil")
+        return awaitTask(process, self.uuid, turtle.transferTo, slot, count)
+    end
+
+    function drivers.turtle.methods:getItemDetail(slot, detailed)
+        expect(1, slot, "number", "nil")
+        expect(2, detailed, "boolean", "nil")
+        if detailed then return awaitTask(process, self.uuid, turtle.getItemDetail, slot, true)
+        else return turtle.getItemDetail(slot) end
+    end
+
+    function drivers.turtle:init()
+        self.metadata.fuelLimit = turtle.getFuelLimit()
+        hardware.register(hardware.add(self, "async"), drivers.turtle_async)
+    end
+
+    drivers.turtle_async = {
+        name = "turtle_async",
+        type = "turtle:async",
+        properties = {
+            "itemCount",
+            "itemSpace",
+            "fuelLevel",
+            "selectedSlot",
+            "equippedLeft",
+            "equippedRight"
+        },
+        methods = {}
+    }
+
+    drivers.turtle_async.methods.forward = repeatTurtleAsyncMethod "forward"
+    drivers.turtle_async.methods.back = repeatTurtleAsyncMethod "back"
+    drivers.turtle_async.methods.left = repeatTurtleAsyncMethod "left"
+    drivers.turtle_async.methods.right = repeatTurtleAsyncMethod "right"
+    drivers.turtle_async.methods.turnLeft = noArgTurtleAsyncMethod "turnLeft"
+    drivers.turtle_async.methods.turnRight = noArgTurtleAsyncMethod "turnRight"
+    drivers.turtle_async.methods.dig = directionalTurtleAsyncMethod ("dig", "string")
+    drivers.turtle_async.methods.place = directionalTurtleAsyncMethod ("place", "string")
+    drivers.turtle_async.methods.attack = directionalTurtleAsyncMethod ("attack", "string")
+    drivers.turtle_async.methods.drop = directionalTurtleAsyncMethod ("drop", "number")
+    drivers.turtle_async.methods.suck = directionalTurtleAsyncMethod ("suck", "number")
+    drivers.turtle_async.methods.detect = directionalTurtleAsyncMethod "detect"
+    drivers.turtle_async.methods.compare = directionalTurtleAsyncMethod "compare"
+    drivers.turtle_async.methods.inspect = directionalTurtleAsyncMethod "inspect"
+    drivers.turtle_async.methods.getSelectedSlot = turtle.getSelectedSlot
+    drivers.turtle_async.methods.setSelectedSlot = oneArgTurtleAsyncMethod "select" ("number")
+    drivers.turtle_async.methods.getItemCount = oneArgTurtleMethod "getItemCount" ("number", "nil")
+    drivers.turtle_async.methods.getItemSpace = oneArgTurtleMethod "getItemSpace" ("number", "nil")
+    drivers.turtle_async.methods.getFuelLevel = turtle.getFuelLevel
+    drivers.turtle_async.methods.refuel = oneArgTurtleAsyncMethod "refuel" ("number", "nil")
+    drivers.turtle_async.methods.getEquippedLeft = turtle.getEquippedLeft
+    drivers.turtle_async.methods.getEquippedRight = turtle.getEquippedRight
+    drivers.turtle_async.methods.compareTo = oneArgTurtleAsyncMethod "compareTo" ("number")
+
+    function drivers.turtle_async.methods:turnAround(process)
+        addTask(process, self.uuid, turtle.turnLeft)
+        return addTask(process, self.uuid, turtle.turnLeft)
+    end
+
+    function drivers.turtle_async.methods:setEquippedLeft(process, slot)
+        expect(1, slot, "number", "nil")
+        if slot then addTask(process, self.uuid, turtle.select, slot) end
+        return addTask(process, self.uuid, turtle.equipLeft)
+    end
+
+    function drivers.turtle_async.methods:setEquippedRight(process, slot)
+        expect(1, slot, "number", "nil")
+        if slot then addTask(process, self.uuid, turtle.select, slot) end
+        return addTask(process, self.uuid, turtle.equipRight)
+    end
+
+    function drivers.turtle_async.methods:transferTo(process, slot, count)
+        expect(1, slot, "number")
+        expect(2, count, "number", "nil")
+        return addTask(process, self.uuid, turtle.transferTo, slot, count)
+    end
+
+    function drivers.turtle_async.methods:getItemDetail(slot, detailed)
+        expect(1, slot, "number", "nil")
+        expect(2, detailed, "boolean", "nil")
+        if detailed then return addTask(process, self.uuid, turtle.getItemDetail, slot, true)
+        else return turtle.getItemDetail(slot) end
+    end
+
+    function drivers.turtle_async:init()
+        self.metadata.fuelLimit = turtle.getFuelLimit()
+    end
+
 end
 
 --#endregion

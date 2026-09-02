@@ -14,6 +14,7 @@
 -- Licensed under the MIT license
 local kernelArgs = table.pack(...)
 local keptAPIs = {bit32 = true, bit = true, ccemux = true, config = true, coroutine = true, debug = true, ffi = true, fs = true, http = true, io = true, jit = true, mounter = true, os = true, periphemu = true, peripheral = true, redstone = true, rs = true, term = true, utf8 = true, _HOST = true, _CC_DEFAULT_SETTINGS = true, _CC_DISABLE_LUA51_FEATURES = true, _VERSION = true, assert = true, collectgarbage = true, error = true, gcinfo = true, getfenv = true, getmetatable = true, ipairs = true, load = true, loadstring = true, math = true, newproxy = true, next = true, pairs = true, pcall = true, rawequal = true, rawget = true, rawlen = true, rawset = true, select = true, setfenv = true, setmetatable = true, string = true, table = true, tonumber = true, tostring = true, type = true, unpack = true, xpcall = true, turtle = true, pocket = true, commands = true, _G = true, _HEADLESS = true}
+if _VERSION ~= "Lua 5.1" then keptAPIs.getfenv, keptAPIs.setfenv = nil end
 local t = {}
 for k in pairs(_G) do if not keptAPIs[k] then table.insert(t, k) end end
 for _,k in ipairs(t) do _G[k] = nil end
